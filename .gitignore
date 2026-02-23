@@ -34,3 +34,6 @@ Desktop.ini
 
 # Linux
 .directory
+
+# TLA+
+states/
