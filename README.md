@@ -94,11 +94,19 @@ cd actors
 ../gradlew test
 ```
 
-### Run TLC Model Checker (requires TLA+ Toolbox or CLI)
+### Run TLC Model Checker
+
+The project includes `tla2tools.jar` for standalone TLC verification:
 
 ```bash
-# Install TLA+ tools
-# Then run model checking on each spec:
+java -cp src/main/tla/tla2tools.jar tlc2.TLC src/main/tla/ActorMailbox.tla -config src/main/tla/ActorMailbox.cfg
+java -cp src/main/tla/tla2tools.jar tlc2.TLC src/main/tla/ActorLifecycle.tla -config src/main/tla/ActorLifecycle.cfg
+java -cp src/main/tla/tla2tools.jar tlc2.TLC src/main/tla/RequestReply.tla -config src/main/tla/RequestReply.cfg
+```
+
+Or create an alias for convenience:
+```bash
+alias tlc="java -cp src/main/tla/tla2tools.jar tlc2.TLC"
 tlc src/main/tla/ActorMailbox.tla -config src/main/tla/ActorMailbox.cfg
 tlc src/main/tla/ActorLifecycle.tla -config src/main/tla/ActorLifecycle.cfg
 tlc src/main/tla/RequestReply.tla -config src/main/tla/RequestReply.cfg

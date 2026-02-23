@@ -19,7 +19,7 @@
 \*   DeliverReply   → reply arrives, completes the deferred
 \*   Timeout        → deferred.await() with timeout
 
-EXTENDS Naturals, FiniteSets
+EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
     Clients,        \* set of client IDs, e.g. {c1, c2}
