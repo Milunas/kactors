@@ -50,11 +50,6 @@ tasks.test {
 
 kotlin {
     jvmToolchain(21)
-    sourceSets {
-        test {
-            kotlin.srcDir("build/generated/tla2lincheck")
-        }
-    }
 }
 
 // ─── tla2lincheck: Generate Lincheck tests from TLA+ specs ──────
@@ -63,7 +58,7 @@ kotlin {
 // Run: ./gradlew generateLincheckTests
 tla2lincheck {
     tlaSourceDir.set(file("src/main/tla"))
-    outputDir.set(file("build/generated/tla2lincheck"))
+    outputDir.set(file("src/test/tla2lincheck"))
     packageName.set("com.actors.generated")
     threads.set(3)
     actorsPerThread.set(2)
