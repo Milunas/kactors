@@ -1,5 +1,6 @@
 plugins {
     kotlin("jvm") version "2.0.21"
+    id("io.github.tla2lincheck") version "0.1.0-SNAPSHOT"
 }
 
 group = "com.actors"
@@ -49,4 +50,23 @@ tasks.test {
 
 kotlin {
     jvmToolchain(21)
+    sourceSets {
+        test {
+            kotlin.srcDir("build/generated/tla2lincheck")
+        }
+    }
+}
+
+// ─── tla2lincheck: Generate Lincheck tests from TLA+ specs ──────
+// Parses .tla files in src/main/tla/ and generates Kotlin Lincheck
+// test classes with embedded TLA+ invariants.
+// Run: ./gradlew generateLincheckTests
+tla2lincheck {
+    tlaSourceDir.set(file("src/main/tla"))
+    outputDir.set(file("build/generated/tla2lincheck"))
+    packageName.set("com.actors.generated")
+    threads.set(3)
+    actorsPerThread.set(2)
+    iterations.set(50)
+    embedInvariants.set(true)
 }
