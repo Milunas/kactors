@@ -151,5 +151,53 @@ class ActorSystem(
      */
     val actorNames: Set<String> get() = actors.keys.toSet()
 
+    // ─── Observability & Tracing ─────────────────────────────────
+
+    /**
+     * Dump the full supervision tree as ASCII art.
+     * Includes per-actor state, message counts, and flight recorder stats.
+     *
+     * Example output:
+     * ```
+     * ActorSystem: my-system
+     * ├── [RUNNING] my-system/guardian  msgs=42 restarts=0 mailbox=../256 trace=128/128
+     * │   ├── [RUNNING] my-system/guardian/worker-1  msgs=20 restarts=1
+     * │   └── [STOPPED] my-system/guardian/worker-2  msgs=10 restarts=3
+     * └── [RUNNING] my-system/monitor  msgs=5 restarts=0
+     * ```
+     */
+    fun dumpTree(): String = ActorTreeDumper.dumpAscii(this)
+
+    /**
+     * Dump the full supervision tree as JSON.
+     * Useful for tooling, web UIs, and programmatic analysis.
+     */
+    fun dumpTreeJson(): String = ActorTreeDumper.dumpJson(this)
+
+    /**
+     * Dump the flight recorder of a specific actor by name.
+     *
+     * @param actorName Local name of the top-level actor
+     * @return Formatted flight recorder dump, or null if actor not found
+     */
+    fun dumpActorTrace(actorName: String): String? {
+        return actors[actorName]?.flightRecorder?.dump()
+    }
+
+    /**
+     * Dump all actors' flight recorders.
+     * Useful for post-mortem debugging of the entire system.
+     */
+    fun dumpAllTraces(): String {
+        val sb = StringBuilder()
+        sb.appendLine("═══════════════════════════════════════════════════")
+        sb.appendLine("SYSTEM TRACE DUMP: $name")
+        sb.appendLine("═══════════════════════════════════════════════════")
+        actors.values.sortedBy { it.name }.forEach { cell ->
+            sb.appendLine(cell.flightRecorder.dump())
+        }
+        return sb.toString()
+    }
+
     override fun toString(): String = "ActorSystem($name, actors=${actors.size})"
 }

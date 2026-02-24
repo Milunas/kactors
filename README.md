@@ -46,13 +46,16 @@ A formally specified Actor Model library built on Kotlin Coroutines and Channels
 | Component | File | TLA+ Spec | Description |
 |-----------|------|-----------|-------------|
 | **Mailbox** | `Mailbox.kt` | `ActorMailbox.tla` | Bounded FIFO channel (send/receive/trySend/tryReceive) |
-| **ActorCell** | `ActorCell.kt` | `ActorLifecycle.tla` `ActorHierarchy.tla` `DeathWatch.tla` | Runtime container: lifecycle FSM, select-based message loop, hierarchy management |
+| **ActorCell** | `ActorCell.kt` | `ActorLifecycle.tla` `ActorHierarchy.tla` `DeathWatch.tla` `ActorTrace.tla` | Runtime container: lifecycle FSM, select-based message loop, hierarchy management, flight recorder |
 | **ActorRef** | `ActorRef.kt` | `RequestReply.tla` | Location-transparent handle: tell + ask pattern |
 | **Behavior** | `Behavior.kt` | — | Functional message handler: `(ActorContext<M>, M) → Behavior<M>` |
-| **ActorContext** | `ActorContext.kt` | `ActorHierarchy.tla` `DeathWatch.tla` | Actor's view of the world: self, spawn, watch, stop, children |
+| **ActorContext** | `ActorContext.kt` | `ActorHierarchy.tla` `DeathWatch.tla` | Actor's view of the world: self, spawn, watch, stop, children, flightRecorder |
 | **Signal** | `Signal.kt` | `ActorLifecycle.tla` `DeathWatch.tla` | Lifecycle events: PreStart, PostStop, Terminated, ChildFailed |
 | **SupervisorStrategy** | `SupervisorStrategy.kt` | `ActorLifecycle.tla` | Fault tolerance: stop/restart/resume/escalate |
-| **ActorSystem** | `ActorSystem.kt` | — | Top-level container with SupervisorJob scope |
+| **ActorSystem** | `ActorSystem.kt` | — | Top-level container with SupervisorJob scope, tree dump, trace dump |
+| **TraceEvent** | `TraceEvent.kt` | `ActorTrace.tla` | Coalgebraic observable events: messages, signals, state changes, failures, slow msgs |
+| **ActorFlightRecorder** | `ActorFlightRecorder.kt` | `ActorTrace.tla` | Bounded ring buffer of trace events with Lamport clocks and invariant checks |
+| **ActorTreeDumper** | `ActorTreeDumper.kt` | — | Supervision tree visualization (ASCII + JSON) |
 
 ---
 
@@ -103,6 +106,15 @@ Invariants: NoPhantomTerminated, NoSelfWatch, AliveNotTerminatedByAlive,
 Config: 4 actors → ~1min TLC
 ```
 
+### 6. ActorTrace.tla — Coalgebraic Trace Buffer (Flight Recorder)
+```
+State: trace (Seq of EventTypes), eventCount, actorAlive, lamportClock
+Actions: RecordEvent(a, e), StopActor(a)
+Invariants: BoundedTrace, NonNegativeEventCount, DeadActorTraceImmutable,
+            TraceLengthBounded, TraceLengthConsistency, LamportClockMonotonic
+Config: 2 actors, MaxBufferSize=4, MaxEvents=4 → ~2s TLC
+```
+
 ---
 
 ## Formal Verification Pipeline
@@ -149,6 +161,7 @@ tlc src/main/tla/ActorLifecycle.tla -config src/main/tla/ActorLifecycle.cfg
 tlc src/main/tla/RequestReply.tla -config src/main/tla/RequestReply.cfg
 tlc src/main/tla/ActorHierarchy.tla -config src/main/tla/ActorHierarchy.cfg
 tlc src/main/tla/DeathWatch.tla -config src/main/tla/DeathWatch.cfg
+tlc src/main/tla/ActorTrace.tla -config src/main/tla/ActorTrace.cfg
 ```
 
 ### Using tla2lincheck (Gradle Plugin)
@@ -349,6 +362,54 @@ val ref2 = system.spawn("smart", myBehavior,
     })
 ```
 
+### Traceability & Debugging (Flight Recorder)
+
+Every actor automatically records trace events in a bounded ring buffer.
+No setup required — tracing is always-on with near-zero overhead.
+
+```kotlin
+val system = ActorSystem.create("my-app")
+val ref = system.spawn("worker", workerBehavior())
+
+// ... actor processes messages ...
+
+// Dump supervision tree (ASCII art with per-actor stats)
+println(system.dumpTree())
+// Output:
+// ActorSystem: my-app
+// └── [RUNNING] my-app/worker  msgs=42 restarts=0 mailbox=../256 trace=48/128
+
+// Dump a specific actor's flight recorder
+println(system.dumpActorTrace("worker"))
+// Output:
+// ╔══════════════════════════════════════════════════════════════╗
+// ║ FLIGHT RECORDER: my-app/worker                              ║
+// ║ Events: 48 recorded, 48 in buffer, 0 evicted                ║
+// ╠══════════════════════════════════════════════════════════════╣
+// ║ [L:1   ] ...  STATE CREATED→STARTING                        ║
+// ║ [L:2   ] ...  SIGNAL PreStart                                ║
+// ║ [L:3   ] ...  STATE STARTING→RUNNING                        ║
+// ║ [L:4   ] ...  MSG_RECV ProcessTask (mailbox=0)              ║
+// ╚══════════════════════════════════════════════════════════════╝
+
+// Dump all traces system-wide (for post-mortem)
+println(system.dumpAllTraces())
+
+// Dump as JSON (for tooling / visualization)
+println(system.dumpTreeJson())
+
+// Access flight recorder from within a behavior
+val debuggableActor = receive<DebugMsg> { ctx, msg ->
+    val recentEvents = ctx.flightRecorder.lastN(5)
+    val failures = ctx.flightRecorder.snapshot { it is TraceEvent.FailureHandled }
+    Behavior.same()
+}
+```
+
+**Recorded events:** MessageReceived, MessageSent, SignalDelivered,
+StateChanged, BehaviorChanged, ChildSpawned, ChildStopped,
+WatchRegistered, FailureHandled, SlowMessageWarning
+
 ---
 
 ## Test Suite
@@ -362,6 +423,7 @@ val ref2 = system.spawn("smart", myBehavior,
 | `ActorConcurrencyTest` | Concurrent stress tests | All specs | Real actor system under load |
 | `ActorHierarchyTest` | JUnit 5 unit tests | — | Parent-child spawning, cascading stop, context.stop(child) |
 | `SignalTest` | JUnit 5 unit tests | — | PreStart, PostStop, Terminated, ChildFailed, DeathWatch, setup/receive DSL |
+| `ActorTraceTest` | JUnit 5 + concurrent stress | `ActorTrace.tla` | Flight recorder, ring buffer eviction, Lamport clocks, tree dump, slow message detection |
 
 ---
 

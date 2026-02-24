@@ -46,16 +46,26 @@ import java.util.concurrent.atomic.AtomicReference
  *   - Backpressure via bounded mailbox channel
  *   - Structured concurrency: parent stop → children stop
  */
-@TlaSpec("ActorLifecycle|ActorHierarchy|DeathWatch")
+@TlaSpec("ActorLifecycle|ActorHierarchy|DeathWatch|ActorTrace")
 class ActorCell<M : Any>(
     val name: String,
     private val initialBehavior: Behavior<M>,
     internal val mailbox: Mailbox<M>,
     private val supervisorStrategy: SupervisorStrategy,
-    private val parent: ActorCell<*>? = null
+    private val parent: ActorCell<*>? = null,
+    private val traceCapacity: Int = ActorFlightRecorder.DEFAULT_CAPACITY,
+    private val slowMessageThresholdMs: Long = DEFAULT_SLOW_MESSAGE_THRESHOLD_MS
 ) {
     companion object {
         private val log = LoggerFactory.getLogger(ActorCell::class.java)
+
+        /**
+         * Default threshold for slow message detection (milliseconds).
+         * When message processing exceeds this, a SlowMessageWarning
+         * trace event is recorded and a warning is logged.
+         * Set to 0 to disable slow message detection.
+         */
+        const val DEFAULT_SLOW_MESSAGE_THRESHOLD_MS: Long = 100L
     }
 
     // ─── Lifecycle State ─────────────────────────────────────────
@@ -75,6 +85,20 @@ class ActorCell<M : Any>(
     val state: ActorState get() = stateRef.get()
     val restartCount: Int get() = restartCounter.get()
     val processedCount: Int get() = processedCounter.get()
+
+    // ─── Flight Recorder (Coalgebraic Trace Buffer) ──────────────
+
+    /**
+     * Per-actor flight recorder: bounded ring buffer of trace events.
+     * Records every observable event (message, signal, state change,
+     * behavior transition, child spawn, failure) for post-mortem debugging.
+     *
+     * In coalgebraic terms, this captures the observation component of
+     * the actor's behavior coalgebra (B, δ: B → M → B × TraceEvent).
+     *
+     * TLA+ Spec: ActorTrace.tla — trace variable
+     */
+    val flightRecorder = ActorFlightRecorder(traceCapacity)
 
     // ─── Actor Identity ──────────────────────────────────────────
 
@@ -134,6 +158,7 @@ class ActorCell<M : Any>(
         check(stateRef.compareAndSet(ActorState.CREATED, ActorState.STARTING)) {
             "Cannot start actor '$name' in state ${stateRef.get()}"
         }
+        recordStateChange(ActorState.CREATED, ActorState.STARTING)
 
         system = actorSystem
 
@@ -149,12 +174,14 @@ class ActorCell<M : Any>(
                 // Unwrap SetupBehavior: run factory to initialize
                 if (currentBehavior is SetupBehavior<M>) {
                     currentBehavior = (currentBehavior as SetupBehavior<M>).factory(context)
+                    recordBehaviorChange(currentBehavior)
                 }
 
                 // Deliver PreStart signal
                 deliverSignal(Signal.PreStart)
 
                 stateRef.set(ActorState.RUNNING)
+                recordStateChange(ActorState.STARTING, ActorState.RUNNING)
                 log.debug("Actor '{}' is now RUNNING", name)
 
                 messageLoop()
@@ -219,7 +246,23 @@ class ActorCell<M : Any>(
                     }
                     mailbox.channel.onReceive { message ->
                         mailbox.onReceived()
+
+                        // Record message receipt in flight recorder
+                        val messageType = message!!::class.simpleName ?: "Unknown"
+                        recordMessageReceived(messageType)
+
+                        // Process with slow message detection
+                        val startTimeNs = System.nanoTime()
                         val nextBehavior = currentBehavior.onMessage(context, message)
+                        val durationMs = (System.nanoTime() - startTimeNs) / 1_000_000
+
+                        // Detect slow messages
+                        if (slowMessageThresholdMs > 0 && durationMs > slowMessageThresholdMs) {
+                            recordSlowMessage(messageType, durationMs)
+                            log.warn("Actor '{}' slow message: {} took {}ms (threshold={}ms)",
+                                name, messageType, durationMs, slowMessageThresholdMs)
+                        }
+
                         processedCounter.incrementAndGet()
                         handleBehaviorResult(nextBehavior)
                     }
@@ -250,6 +293,15 @@ class ActorCell<M : Any>(
      * Otherwise, the signal is ignored (default behavior).
      */
     private suspend fun deliverSignal(signal: Signal): Behavior<M> {
+        // Record signal delivery in flight recorder
+        val signalType = signal::class.simpleName ?: "Unknown"
+        val detail = when (signal) {
+            is Signal.Terminated -> "watched=${signal.ref.name}"
+            is Signal.ChildFailed -> "child=${signal.ref.name}, cause=${signal.cause.message}"
+            else -> ""
+        }
+        recordSignalDelivered(signalType, detail)
+
         return if (currentBehavior is SignalBehavior<M>) {
             (currentBehavior as SignalBehavior<M>).onSignal(context, signal)
         } else {
@@ -264,7 +316,9 @@ class ActorCell<M : Any>(
         when {
             Behavior.isStopped(nextBehavior) -> {
                 log.debug("Actor '{}' behavior returned Stopped", name)
+                val prev = stateRef.get()
                 stateRef.set(ActorState.STOPPING)
+                recordStateChange(prev, ActorState.STOPPING)
                 mailbox.close()
                 job?.cancel()
             }
@@ -273,6 +327,7 @@ class ActorCell<M : Any>(
             }
             else -> {
                 currentBehavior = nextBehavior
+                recordBehaviorChange(nextBehavior)
             }
         }
     }
@@ -294,12 +349,17 @@ class ActorCell<M : Any>(
         val directive = supervisorStrategy.decide(error, restartCounter.get())
         log.warn("Actor '{}' failed: {} → {}", name, error.message, directive)
 
+        // Record failure in flight recorder
+        recordFailure(error, directive, restartCounter.get())
+
         when (directive) {
             SupervisorStrategy.Directive.RESUME -> {
                 log.debug("Actor '{}' resuming after failure", name)
             }
             SupervisorStrategy.Directive.RESTART -> {
+                val prevState = stateRef.get()
                 stateRef.set(ActorState.RESTARTING)
+                recordStateChange(prevState, ActorState.RESTARTING)
                 restartCounter.incrementAndGet()
                 log.info("Actor '{}' restarting (attempt {}/{})", name,
                     restartCounter.get(), supervisorStrategy.maxRestarts)
@@ -316,12 +376,14 @@ class ActorCell<M : Any>(
                 // Unwrap SetupBehavior again
                 if (currentBehavior is SetupBehavior<M>) {
                     currentBehavior = (currentBehavior as SetupBehavior<M>).factory(context)
+                    recordBehaviorChange(currentBehavior)
                 }
 
                 // Deliver PreStart to new behavior
                 deliverSignal(Signal.PreStart)
 
                 stateRef.set(ActorState.RUNNING)
+                recordStateChange(ActorState.RESTARTING, ActorState.RUNNING)
                 log.debug("Actor '{}' restarted, now RUNNING", name)
             }
             SupervisorStrategy.Directive.STOP -> {
@@ -378,6 +440,9 @@ class ActorCell<M : Any>(
         childCell.start(childScope, system)
         log.debug("Actor '{}' spawned child '{}'", name, childFullName)
 
+        // Record child spawn in parent's flight recorder
+        recordChildSpawned(childFullName, behavior::class.simpleName ?: "Unknown")
+
         return childCell.ref
     }
 
@@ -414,6 +479,7 @@ class ActorCell<M : Any>(
     internal fun onChildStopped(child: ActorCell<*>) {
         val localName = child.name.substringAfterLast('/')
         children.remove(localName)
+        recordChildStopped(child.name, "normal")
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -431,6 +497,9 @@ class ActorCell<M : Any>(
         other.watchers.add(this)
         watching.add(other)
         log.debug("Actor '{}' watching '{}'", name, other.name)
+
+        // Record watch registration in flight recorder
+        recordWatchRegistered(other.name)
 
         // If already dead, deliver immediately
         if (other.state == ActorState.STOPPED) {
@@ -488,7 +557,11 @@ class ActorCell<M : Any>(
      */
     @TlaAction("CompleteStopping")
     private suspend fun performStop() {
+        val prevState = stateRef.get()
         stateRef.set(ActorState.STOPPING)
+        if (prevState != ActorState.STOPPING) {
+            recordStateChange(prevState, ActorState.STOPPING)
+        }
 
         // 1. Stop all children first (cascading stop)
         stopAllChildren()
@@ -520,6 +593,7 @@ class ActorCell<M : Any>(
         }
 
         stateRef.set(ActorState.STOPPED)
+        recordStateChange(ActorState.STOPPING, ActorState.STOPPED)
         log.debug("Actor '{}' is now STOPPED (processed: {}, restarts: {}, children stopped)",
             name, processedCounter.get(), restartCounter.get())
     }
@@ -590,7 +664,135 @@ class ActorCell<M : Any>(
         check(checkNoSelfWatch()) { "Invariant violated: NoSelfWatch — '$name' watches itself" }
         check(checkDeadNotWatching()) { "Invariant violated: DeadNotWatching — '$name' is stopped but still watching ${watching.size} actors" }
 
+        // Flight recorder invariants
+        flightRecorder.checkAllInvariants()
+
         mailbox.checkAllInvariants()
+    }
+
+    // ─── Trace Recording Helpers (ActorTrace.tla bridge) ─────────
+
+    /**
+     * Record a state transition in the flight recorder.
+     * TLA+ action: RecordEvent(a, "state_changed")
+     */
+    private fun recordStateChange(from: ActorState, to: ActorState) {
+        flightRecorder.record(TraceEvent.StateChanged(
+            actorPath = name,
+            timestamp = java.time.Instant.now(),
+            lamportTimestamp = flightRecorder.nextLamportTimestamp(),
+            fromState = from,
+            toState = to
+        ))
+    }
+
+    /**
+     * Record a message receipt in the flight recorder.
+     * TLA+ action: RecordEvent(a, "msg_received")
+     */
+    private fun recordMessageReceived(messageType: String) {
+        flightRecorder.record(TraceEvent.MessageReceived(
+            actorPath = name,
+            timestamp = java.time.Instant.now(),
+            lamportTimestamp = flightRecorder.nextLamportTimestamp(),
+            messageType = messageType,
+            mailboxSizeAfter = 0 // approximate — exact size requires experimental API
+        ))
+    }
+
+    /**
+     * Record a signal delivery in the flight recorder.
+     * TLA+ action: RecordEvent(a, "signal_delivered")
+     */
+    private fun recordSignalDelivered(signalType: String, detail: String) {
+        flightRecorder.record(TraceEvent.SignalDelivered(
+            actorPath = name,
+            timestamp = java.time.Instant.now(),
+            lamportTimestamp = flightRecorder.nextLamportTimestamp(),
+            signalType = signalType,
+            detail = detail
+        ))
+    }
+
+    /**
+     * Record a behavior change in the flight recorder.
+     * TLA+ action: RecordEvent(a, "behavior_changed")
+     */
+    private fun recordBehaviorChange(newBehavior: Behavior<M>) {
+        flightRecorder.record(TraceEvent.BehaviorChanged(
+            actorPath = name,
+            timestamp = java.time.Instant.now(),
+            lamportTimestamp = flightRecorder.nextLamportTimestamp(),
+            behaviorType = newBehavior::class.simpleName ?: "Anonymous"
+        ))
+    }
+
+    /**
+     * Record a child actor spawn in the flight recorder.
+     * TLA+ action: RecordEvent(a, "child_spawned")
+     */
+    private fun recordChildSpawned(childPath: String, behaviorType: String) {
+        flightRecorder.record(TraceEvent.ChildSpawned(
+            actorPath = name,
+            timestamp = java.time.Instant.now(),
+            lamportTimestamp = flightRecorder.nextLamportTimestamp(),
+            childPath = childPath,
+            childBehaviorType = behaviorType
+        ))
+    }
+
+    /**
+     * Record a child actor stop in the flight recorder.
+     */
+    private fun recordChildStopped(childPath: String, reason: String) {
+        flightRecorder.record(TraceEvent.ChildStopped(
+            actorPath = name,
+            timestamp = java.time.Instant.now(),
+            lamportTimestamp = flightRecorder.nextLamportTimestamp(),
+            childPath = childPath,
+            reason = reason
+        ))
+    }
+
+    /**
+     * Record a watch registration in the flight recorder.
+     */
+    private fun recordWatchRegistered(watchedPath: String) {
+        flightRecorder.record(TraceEvent.WatchRegistered(
+            actorPath = name,
+            timestamp = java.time.Instant.now(),
+            lamportTimestamp = flightRecorder.nextLamportTimestamp(),
+            watchedPath = watchedPath
+        ))
+    }
+
+    /**
+     * Record a failure handling event in the flight recorder.
+     */
+    private fun recordFailure(error: Throwable, directive: SupervisorStrategy.Directive, restarts: Int) {
+        flightRecorder.record(TraceEvent.FailureHandled(
+            actorPath = name,
+            timestamp = java.time.Instant.now(),
+            lamportTimestamp = flightRecorder.nextLamportTimestamp(),
+            errorType = error::class.simpleName ?: "Unknown",
+            errorMessage = error.message ?: "",
+            directive = directive,
+            restartCount = restarts
+        ))
+    }
+
+    /**
+     * Record a slow message warning in the flight recorder.
+     */
+    private fun recordSlowMessage(messageType: String, durationMs: Long) {
+        flightRecorder.record(TraceEvent.SlowMessageWarning(
+            actorPath = name,
+            timestamp = java.time.Instant.now(),
+            lamportTimestamp = flightRecorder.nextLamportTimestamp(),
+            messageType = messageType,
+            durationMs = durationMs,
+            thresholdMs = slowMessageThresholdMs
+        ))
     }
 
     override fun toString(): String = "ActorCell($name, state=${stateRef.get()}, children=${children.size})"

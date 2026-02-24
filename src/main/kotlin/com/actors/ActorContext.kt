@@ -141,5 +141,35 @@ class ActorContext<M : Any> internal constructor(
     val children: Set<ActorRef<*>>
         get() = cell.childRefs
 
+    /**
+     * Access the actor's flight recorder for debugging and tracing.
+     *
+     * The flight recorder captures a bounded ring buffer of trace events
+     * (messages received, signals delivered, state changes, behavior
+     * transitions, child spawns, failures, slow messages).
+     *
+     * This is the coalgebraic observation of the actor's behavior:
+     * a finite prefix of the final coalgebra over the observation functor.
+     *
+     * Example:
+     * ```kotlin
+     * receive<DebugMsg> { ctx, msg ->
+     *     when (msg) {
+     *         is DumpTrace -> {
+     *             val trace = ctx.flightRecorder.snapshot()
+     *             msg.replyTo.tell(trace.toString())
+     *             Behavior.same()
+     *         }
+     *         is DumpTraceFormatted -> {
+     *             msg.replyTo.tell(ctx.flightRecorder.dump())
+     *             Behavior.same()
+     *         }
+     *     }
+     * }
+     * ```
+     */
+    val flightRecorder: ActorFlightRecorder
+        get() = cell.flightRecorder
+
     override fun toString(): String = "ActorContext($name)"
 }
