@@ -88,6 +88,15 @@ class Mailbox<M : Any>(
     }
 
     /**
+     * Increments the received counter. Used internally by ActorCell
+     * when receiving via select { channel.onReceive } instead of
+     * the direct receive() method.
+     */
+    internal fun onReceived() {
+        totalReceived++
+    }
+
+    /**
      * Attempts to dequeue without suspending.
      * Returns null if mailbox is empty.
      * Corresponds to TLA+ actions: Receive + TryReceiveEmpty

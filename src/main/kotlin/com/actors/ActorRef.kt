@@ -93,7 +93,7 @@ class ActorRef<M : Any> internal constructor(
      */
     private fun <R : Any> createReplyRef(deferred: CompletableDeferred<R>): ActorRef<R> {
         val replyMailbox = Mailbox<R>(capacity = 1)
-        val replyBehavior = Behavior<R> { reply ->
+        val replyBehavior = Behavior<R> { _, reply ->
             deferred.complete(reply)
             Behavior.stopped()
         }
@@ -103,10 +103,9 @@ class ActorRef<M : Any> internal constructor(
             mailbox = replyMailbox,
             supervisorStrategy = SupervisorStrategy.stop()
         )
-        return ActorRef("$name/reply", replyMailbox, replyCell).also {
-            // Reply ref auto-processes — launch inline
-            replyCell.startInline()
-        }
+        // Reply ref auto-processes — launch inline
+        replyCell.startInline(actorCell.system)
+        return replyCell.ref
     }
 
     val isAlive: Boolean get() = actorCell.state != ActorState.STOPPED

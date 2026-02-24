@@ -16,17 +16,26 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   1. Actor spawning with type-safe refs
  *   2. Actor lookup by name
  *   3. Graceful system shutdown
- *   4. Dispatcher configuration
+ *   4. Root of the supervision tree
  *
- * Architecture:
+ * Architecture (with hierarchy):
+ * ```
  * ┌─────────────────────────────────────────────────┐
  * │                   ActorSystem                    │
- * │  ┌──────────┐  ┌──────────┐  ┌──────────┐      │
- * │  │ ActorCell │  │ ActorCell │  │ ActorCell │ ... │
- * │  │ (mailbox) │  │ (mailbox) │  │ (mailbox) │     │
- * │  └──────────┘  └──────────┘  └──────────┘      │
  * │          CoroutineScope (SupervisorJob)          │
+ * │                                                  │
+ * │  ┌──────────┐  ┌──────────┐  ┌──────────┐      │
+ * │  │ ActorCell │  │ ActorCell │  │ ActorCell │     │
+ * │  │ (parent)  │  │ (parent)  │  │ (parent)  │     │
+ * │  │  ┌─────┐  │  │          │  │  ┌─────┐  │     │
+ * │  │  │child│  │  │          │  │  │child│  │     │
+ * │  │  └─────┘  │  │          │  │  └─────┘  │     │
+ * │  └──────────┘  └──────────┘  └──────────┘      │
  * └─────────────────────────────────────────────────┘
+ * ```
+ *
+ * Top-level actors spawned here have no parent (parent = null).
+ * They can spawn children via [ActorContext.spawn], forming a tree.
  *
  * Future (Distributed Actor System):
  *   - ActorSystem per node
@@ -56,7 +65,11 @@ class ActorSystem(
     private val terminated = AtomicBoolean(false)
 
     /**
-     * Spawn a new actor with the given behavior and return its ref.
+     * Spawn a new top-level actor with the given behavior and return its ref.
+     *
+     * Top-level actors have no parent — they are directly supervised
+     * by the system. Use [ActorContext.spawn] within a behavior to
+     * create child actors that form a supervision tree.
      *
      * @param name Unique name for the actor (used for lookup and logging)
      * @param behavior The initial message handling behavior
@@ -71,7 +84,7 @@ class ActorSystem(
         mailboxCapacity: Int = Mailbox.DEFAULT_CAPACITY,
         supervisorStrategy: SupervisorStrategy = SupervisorStrategy.restart()
     ): ActorRef<M> {
-        check(!terminated.get()) { "Cannot spawn actor in terminated ActorSystem '$name'" }
+        check(!terminated.get()) { "Cannot spawn actor in terminated ActorSystem '${this.name}'" }
         check(!actors.containsKey(name)) { "Actor with name '$name' already exists" }
 
         val mailbox = Mailbox<M>(mailboxCapacity)
@@ -79,15 +92,16 @@ class ActorSystem(
             name = "${this.name}/$name",
             initialBehavior = behavior,
             mailbox = mailbox,
-            supervisorStrategy = supervisorStrategy
+            supervisorStrategy = supervisorStrategy,
+            parent = null  // Top-level: no parent
         )
 
         actors[name] = cell
-        cell.start(scope)
+        cell.start(scope, this)
         log.info("Spawned actor '{}/{}' (mailbox={}, supervisor={})",
             this.name, name, mailboxCapacity, supervisorStrategy)
 
-        return ActorRef(name = "${this.name}/$name", mailbox = mailbox, actorCell = cell)
+        return cell.ref
     }
 
     /**
@@ -128,7 +142,7 @@ class ActorSystem(
     val isTerminated: Boolean get() = terminated.get()
 
     /**
-     * Number of actors currently managed by this system.
+     * Number of top-level actors currently managed by this system.
      */
     val actorCount: Int get() = actors.size
 

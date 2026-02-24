@@ -8,6 +8,10 @@ package com.actors
  * Reusable message protocol types for common actor patterns.
  * These demonstrate idiomatic actor design and serve as building
  * blocks for actor-based applications.
+ *
+ * Note: Lifecycle events are delivered via [Signal], not messages.
+ * Signals (PreStart, PostStop, Terminated, ChildFailed) are handled
+ * separately via [Behavior.onSignal].
  */
 
 /**
@@ -18,18 +22,6 @@ package com.actors
  */
 interface Request<R : Any> {
     val replyTo: ActorRef<R>
-}
-
-/**
- * Lifecycle signal messages sent by the system (not by users).
- * Future extension: watch/unwatch, terminated signals.
- */
-sealed class SystemMessage {
-    /** Sent when a watched actor terminates. */
-    data class Terminated(val actorName: String) : SystemMessage()
-
-    /** Poison pill: requests graceful shutdown. */
-    data object PoisonPill : SystemMessage()
 }
 
 /**

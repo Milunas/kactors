@@ -2,29 +2,43 @@
 
 **Kotlin Coroutines + Channels · TLA+ Verified · Lincheck Tested**
 
-A formally specified Actor Model library built on Kotlin Coroutines and Channels, designed as a foundation for a distributed actor system. Every core component is specified in TLA+, and linearizability is verified using JetBrains Lincheck with invariants auto-generated via tla2lincheck.
+A formally specified Actor Model library built on Kotlin Coroutines and Channels, inspired by Erlang/OTP and Akka Typed. Features parent-child supervision hierarchy, lifecycle signals, DeathWatch, and context-aware behaviors. Every core component is specified in TLA+, and linearizability is verified using JetBrains Lincheck with invariants auto-generated via tla2lincheck.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        ActorSystem                              │
-│                  CoroutineScope (SupervisorJob)                  │
-│                                                                 │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────┐  │
-│  │    ActorCell      │  │    ActorCell      │  │  ActorCell   │  │
-│  │  ┌────────────┐  │  │  ┌────────────┐  │  │  ┌────────┐  │  │
-│  │  │  Mailbox   │  │  │  │  Mailbox   │  │  │  │Mailbox │  │  │
-│  │  │ (Channel)  │  │  │  │ (Channel)  │  │  │  │(Chan.) │  │  │
-│  │  └────────────┘  │  │  └────────────┘  │  │  └────────┘  │  │
-│  │  Behavior<M>     │  │  Behavior<M>     │  │  Behavior<M> │  │
-│  │  Supervisor      │  │  Supervisor      │  │  Supervisor  │  │
-│  └──────────────────┘  └──────────────────┘  └──────────────┘  │
-│         ▲                      ▲                    ▲           │
-│     ActorRef              ActorRef              ActorRef        │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                          ActorSystem                                │
+│                    CoroutineScope (SupervisorJob)                    │
+│                                                                     │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │  ActorCell "guardian"          ◀── ActorRef<GuardianMsg>       │  │
+│  │  ┌──────────┐  ActorContext   Behavior<M>   SupervisorStrategy│  │
+│  │  │ Mailbox  │  ┌──────────────────────────────────┐           │  │
+│  │  │(Channel) │  │ self, spawn(), watch(), stop()   │           │  │
+│  │  └──────────┘  └──────────────────────────────────┘           │  │
+│  │       │                                                       │  │
+│  │       ├── child "worker-1"                                    │  │
+│  │       │   ┌──────────┐  ActorContext  Behavior  Supervisor    │  │
+│  │       │   │ Mailbox  │  SignalChannel (PreStart/PostStop/...) │  │
+│  │       │   └──────────┘                                        │  │
+│  │       │       │                                               │  │
+│  │       │       └── grandchild "db-pool"                        │  │
+│  │       │           ┌──────────┐  ActorContext  Behavior        │  │
+│  │       │           │ Mailbox  │  SignalChannel                 │  │
+│  │       │           └──────────┘                                │  │
+│  │       │                                                       │  │
+│  │       └── child "worker-2"                                    │  │
+│  │           ┌──────────┐  ActorContext  Behavior  Supervisor    │  │
+│  │           │ Mailbox  │  SignalChannel                         │  │
+│  │           └──────────┘                                        │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  Signals: PreStart ──▶ [running] ──▶ PostStop                       │
+│           Terminated(ref)   ChildFailed(ref, cause)                  │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Core Components
@@ -32,9 +46,11 @@ A formally specified Actor Model library built on Kotlin Coroutines and Channels
 | Component | File | TLA+ Spec | Description |
 |-----------|------|-----------|-------------|
 | **Mailbox** | `Mailbox.kt` | `ActorMailbox.tla` | Bounded FIFO channel (send/receive/trySend/tryReceive) |
-| **ActorCell** | `ActorCell.kt` | `ActorLifecycle.tla` | Runtime container: lifecycle FSM + message loop |
+| **ActorCell** | `ActorCell.kt` | `ActorLifecycle.tla` | Runtime container: lifecycle FSM, select-based message loop, hierarchy management |
 | **ActorRef** | `ActorRef.kt` | `RequestReply.tla` | Location-transparent handle: tell + ask pattern |
-| **Behavior** | `Behavior.kt` | — | Functional message handler (immutable state machine) |
+| **Behavior** | `Behavior.kt` | — | Functional message handler: `(ActorContext<M>, M) → Behavior<M>` |
+| **ActorContext** | `ActorContext.kt` | — | Actor's view of the world: self, spawn, watch, stop, children |
+| **Signal** | `Signal.kt` | — | Lifecycle events: PreStart, PostStop, Terminated, ChildFailed |
 | **SupervisorStrategy** | `SupervisorStrategy.kt` | `ActorLifecycle.tla` | Fault tolerance: stop/restart/resume/escalate |
 | **ActorSystem** | `ActorSystem.kt` | — | Top-level container with SupervisorJob scope |
 
@@ -148,14 +164,10 @@ sealed class CounterMsg {
 val system = ActorSystem.create("my-app")
 
 val counter = system.spawn<CounterMsg>("counter", behavior { msg ->
-    var count = 0
     when (msg) {
-        is CounterMsg.Increment -> {
-            count += msg.n
-            Behavior.same()
-        }
+        is CounterMsg.Increment -> Behavior.same()
         is CounterMsg.GetCount -> {
-            msg.replyTo.tell(count)
+            msg.replyTo.tell(0)
             Behavior.same()
         }
     }
@@ -168,10 +180,53 @@ counter.tell(CounterMsg.Increment(5))
 val count: Int = counter.ask { replyTo -> CounterMsg.GetCount(replyTo) }
 ```
 
+### Context-Aware Actor with `receive`
+
+The `receive` DSL gives access to `ActorContext` — the actor's view of the world:
+
+```kotlin
+val greeter = system.spawn("greeter", receive<GreetMsg> { ctx, msg ->
+    ctx.log.info("${ctx.name} received: $msg")
+    ctx.self.tell(GreetMsg.Ack)  // send message to self
+    Behavior.same()
+})
+```
+
+### Setup + Actor Hierarchy
+
+Use `setup` for one-time initialization, then `receive` for message handling.
+Actors spawn children via `context.spawn()`:
+
+```kotlin
+sealed class ManagerMsg {
+    data class CreateWorker(val name: String) : ManagerMsg()
+    data class Dispatch(val task: String) : ManagerMsg()
+}
+
+val manager = system.spawn("manager", setup<ManagerMsg> { ctx ->
+    ctx.log.info("Manager starting, spawning initial workers...")
+    val worker1 = ctx.spawn("worker-1", workerBehavior())
+    val worker2 = ctx.spawn("worker-2", workerBehavior())
+
+    receive { ctx, msg ->
+        when (msg) {
+            is ManagerMsg.CreateWorker -> {
+                ctx.spawn(msg.name, workerBehavior())
+                Behavior.same()
+            }
+            is ManagerMsg.Dispatch -> {
+                // dispatch to workers...
+                Behavior.same()
+            }
+        }
+    }
+})
+```
+
 ### Stateful Behavior with Functional State
 
 ```kotlin
-fun counter(count: Int = 0): Behavior<CounterMsg> = behavior { msg ->
+fun counter(count: Int = 0): Behavior<CounterMsg> = receive { ctx, msg ->
     when (msg) {
         is CounterMsg.Increment -> counter(count + msg.n)  // New behavior with new state
         is CounterMsg.GetCount -> {
@@ -184,7 +239,49 @@ fun counter(count: Int = 0): Behavior<CounterMsg> = behavior { msg ->
 val ref = system.spawn("counter", counter())
 ```
 
-### Lifecycle Hooks
+### Signals and DeathWatch
+
+Actors receive lifecycle signals via `.onSignal {}`:
+
+```kotlin
+val monitored = system.spawn("worker", workerBehavior())
+
+val watcher = system.spawn("watcher", receive<WatcherMsg> { ctx, msg ->
+    Behavior.same()
+}.onSignal { signal ->
+    when (signal) {
+        is Signal.Terminated -> println("Actor ${signal.ref} died!")
+        is Signal.ChildFailed -> println("Child ${signal.ref} failed: ${signal.cause}")
+        is Signal.PreStart -> println("Starting up")
+        is Signal.PostStop -> println("Shutting down")
+    }
+    Behavior.same()
+})
+```
+
+Watch another actor to be notified when it stops:
+
+```kotlin
+val supervisor = setup<SupervisorMsg> { ctx ->
+    val child = ctx.spawn("child", childBehavior())
+    ctx.watch(child)  // Will receive Signal.Terminated when child stops
+
+    receive<SupervisorMsg> { ctx, msg ->
+        Behavior.same()
+    }.onSignal { signal ->
+        when (signal) {
+            is Signal.Terminated -> {
+                println("Child stopped, spawning replacement")
+                ctx.spawn("child", childBehavior())
+                Behavior.same()
+            }
+            else -> Behavior.same()
+        }
+    }
+}
+```
+
+### Lifecycle Hooks (legacy DSL)
 
 ```kotlin
 val actor = system.spawn("db-actor", lifecycleBehavior<DbMsg>(
@@ -194,6 +291,21 @@ val actor = system.spawn("db-actor", lifecycleBehavior<DbMsg>(
     // handle messages
     Behavior.same()
 })
+```
+
+### Cascading Stop
+
+Stopping a parent automatically stops all its children (depth-first):
+
+```kotlin
+val parent = system.spawn("parent", setup<ParentMsg> { ctx ->
+    ctx.spawn("child-a", childBehavior())
+    ctx.spawn("child-b", childBehavior())
+    receive { _, _ -> Behavior.same() }
+})
+
+// Stopping parent cascades to child-a and child-b
+system.terminate()
 ```
 
 ### Fault Tolerance
@@ -225,6 +337,8 @@ val ref2 = system.spawn("smart", myBehavior,
 | `RequestReplyLincheckTest` | Lincheck model check + stress | `RequestReply.tla` | Ask pattern linearizability |
 | `ActorSystemTest` | JUnit 5 unit tests | All specs | Core functionality + invariant checks |
 | `ActorConcurrencyTest` | Concurrent stress tests | All specs | Real actor system under load |
+| `ActorHierarchyTest` | JUnit 5 unit tests | — | Parent-child spawning, cascading stop, context.stop(child) |
+| `SignalTest` | JUnit 5 unit tests | — | PreStart, PostStop, Terminated, ChildFailed, DeathWatch, setup/receive DSL |
 
 ---
 
@@ -237,12 +351,56 @@ val ref2 = system.spawn("smart", myBehavior,
 3. **SupervisorJob** — child failure isolation (one actor crash doesn't kill siblings)
 4. **Structured concurrency** — system shutdown cancels all actor coroutines cleanly
 
+### Why Context-as-Parameter (not CoroutineContext)?
+
+Inspired by Akka Typed's `ActorContext<T>`. The context is passed explicitly to every behavior invocation:
+
+```kotlin
+fun interface Behavior<M : Any> {
+    suspend fun onMessage(context: ActorContext<M>, message: M): Behavior<M>
+}
+```
+
+Benefits:
+1. **Explicit dependencies** — behavior knows exactly what it can access
+2. **Testable** — context can be mocked or stubbed
+3. **No magic** — spawning a child is `ctx.spawn()`, not a global ambient function
+4. **Type-safe** — `ActorContext<M>` is parameterized on the actor's message type
+
+### Why Select-Based Message Loop?
+
+The message loop uses `kotlinx.coroutines.selects.select {}` to multiplex two channels:
+
+```kotlin
+select {
+    signalChannel.onReceive { signal -> handleSignal(signal) }
+    mailbox.channel.onReceive { message -> handleMessage(message) }
+}
+```
+
+This ensures:
+1. **Signal priority** — lifecycle signals (PreStart, PostStop, Terminated) are drained before messages
+2. **No separate coroutine** — signals and messages are processed in the same sequential loop
+3. **Clean shutdown** — PostStop signal is delivered after all children have stopped
+
 ### Why Three Small TLA+ Specs?
 
 1. **Modularity** — each spec is independently checkable (<1M states)
 2. **Composability** — specs can be combined for larger system verification
 3. **Educational** — each spec teaches one concept (mailbox, lifecycle, request-reply)
 4. **Fast feedback** — TLC finishes in 30s–2min per spec
+
+### Erlang/Akka Inspiration
+
+| Concept | Erlang/OTP | Akka Typed | This Library |
+|---------|-----------|-----------|--------------|
+| Message handler | `receive` clause | `Behavior<T>` | `Behavior<M>` (fun interface) |
+| Actor context | `self()` | `ActorContext<T>` | `ActorContext<M>` |
+| Child spawning | `spawn_link` | `ctx.spawn()` | `ctx.spawn()` |
+| Death monitoring | `monitor` | `ctx.watch()` | `ctx.watch()` |
+| Lifecycle events | `init/terminate` | `Signal` | `Signal` sealed class |
+| State machine | `gen_statem` | `Behaviors.receive()` | `receive {}` / `setup {}` |
+| Supervision | `one_for_one` | `SupervisorStrategy` | `SupervisorStrategy` |
 
 ### TLA+ ↔ Kotlin Traceability
 
