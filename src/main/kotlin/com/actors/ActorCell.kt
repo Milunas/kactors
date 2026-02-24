@@ -46,7 +46,7 @@ import java.util.concurrent.atomic.AtomicReference
  *   - Backpressure via bounded mailbox channel
  *   - Structured concurrency: parent stop → children stop
  */
-@TlaSpec("ActorLifecycle")
+@TlaSpec("ActorLifecycle|ActorHierarchy|DeathWatch")
 class ActorCell<M : Any>(
     val name: String,
     private val initialBehavior: Behavior<M>,
@@ -93,6 +93,7 @@ class ActorCell<M : Any>(
     // ─── Hierarchy: Children ─────────────────────────────────────
 
     /** Direct children of this actor. Key = local name (not full path). */
+    @TlaVariable("children")
     private val children = ConcurrentHashMap<String, ActorCell<*>>()
 
     /** Read-only view of child refs for ActorContext. */
@@ -102,9 +103,11 @@ class ActorCell<M : Any>(
     // ─── DeathWatch ──────────────────────────────────────────────
 
     /** Actors watching this actor (notified on termination). */
+    @TlaVariable("watchers")
     private val watchers = CopyOnWriteArraySet<ActorCell<*>>()
 
     /** Actors this actor is watching. */
+    @TlaVariable("watching")
     private val watching = CopyOnWriteArraySet<ActorCell<*>>()
 
     // ─── Signal Channel ──────────────────────────────────────────
@@ -348,7 +351,10 @@ class ActorCell<M : Any>(
     /**
      * Spawn a child actor within this actor's supervision tree.
      * Called by [ActorContext.spawn].
+     *
+     * TLA+ action: SpawnChild(p, c) in ActorHierarchy.tla
      */
+    @TlaAction("SpawnChild")
     fun <C : Any> spawnChild(
         localName: String,
         behavior: Behavior<C>,
@@ -378,7 +384,10 @@ class ActorCell<M : Any>(
     /**
      * Stop a specific child actor.
      * Called by [ActorContext.stop].
+     *
+     * TLA+ action: InitiateStop(a) in ActorHierarchy.tla
      */
+    @TlaAction("InitiateStop")
     fun stopChild(childRef: ActorRef<*>) {
         val localName = childRef.name.substringAfterLast('/')
         val child = children[localName]
@@ -388,7 +397,10 @@ class ActorCell<M : Any>(
 
     /**
      * Stop all children. Called during actor restart and shutdown.
+     *
+     * TLA+ action: CascadeStop(p, c) in ActorHierarchy.tla
      */
+    @TlaAction("CascadeStop")
     private suspend fun stopAllChildren() {
         children.values.forEach { it.stop() }
         children.values.forEach { it.awaitTermination() }
@@ -411,7 +423,10 @@ class ActorCell<M : Any>(
     /**
      * Watch another actor for termination.
      * When [other] stops, this actor receives [Signal.Terminated].
+     *
+     * TLA+ action: Watch(w, target) in DeathWatch.tla
      */
+    @TlaAction("Watch")
     fun watch(other: ActorCell<*>) {
         other.watchers.add(this)
         watching.add(other)
@@ -425,7 +440,10 @@ class ActorCell<M : Any>(
 
     /**
      * Stop watching another actor.
+     *
+     * TLA+ action: Unwatch(w, target) in DeathWatch.tla
      */
+    @TlaAction("Unwatch")
     fun unwatch(other: ActorCell<*>) {
         other.watchers.remove(this)
         watching.remove(other)
@@ -433,7 +451,10 @@ class ActorCell<M : Any>(
 
     /**
      * Notify all watchers that this actor has terminated.
+     *
+     * TLA+ action: Die(a) in DeathWatch.tla — delivers Terminated to watchers
      */
+    @TlaAction("Die")
     private fun notifyWatchers() {
         watchers.forEach { watcher ->
             watcher.signalChannel.trySend(Signal.Terminated(ref))
@@ -512,6 +533,8 @@ class ActorCell<M : Any>(
 
     // ─── Invariant Checks (TLA+ → Kotlin bridge) ────────────────
 
+    // --- ActorLifecycle.tla invariants ---
+
     @TlaInvariant("RestartBudgetRespected")
     fun checkRestartBudget(): Boolean = restartCounter.get() <= supervisorStrategy.maxRestarts
 
@@ -523,12 +546,50 @@ class ActorCell<M : Any>(
     fun checkAliveConsistency(): Boolean =
         !stateRef.get().isAlive() || stateRef.get() != ActorState.STOPPED
 
+    // --- ActorHierarchy.tla invariants ---
+
+    /** INV: Children relationship is bidirectionally consistent. */
+    @TlaInvariant("ChildParentConsistency")
+    fun checkChildParentConsistency(): Boolean =
+        children.values.all { child -> child.parent === this }
+
+    /** INV: A stopped actor has no remaining children. */
+    @TlaInvariant("StoppedHasNoChildren")
+    fun checkStoppedHasNoChildren(): Boolean =
+        stateRef.get() != ActorState.STOPPED || children.isEmpty()
+
+    /** INV: No actor is its own parent. */
+    @TlaInvariant("NoCycles")
+    fun checkNoCycles(): Boolean = parent !== this
+
+    // --- DeathWatch.tla invariants ---
+
+    /** INV: No actor watches itself. */
+    @TlaInvariant("NoSelfWatch")
+    fun checkNoSelfWatch(): Boolean = this !in watching
+
+    /** INV: A dead actor has empty watching set. */
+    @TlaInvariant("DeadNotWatching")
+    fun checkDeadNotWatching(): Boolean =
+        stateRef.get() != ActorState.STOPPED || watching.isEmpty()
+
     fun checkAllInvariants() {
+        // ActorLifecycle invariants
         check(checkRestartBudget()) {
             "Invariant violated: RestartBudgetRespected — restarts=${restartCounter.get()} > max=${supervisorStrategy.maxRestarts}"
         }
         check(checkStoppedNotAlive()) { "Invariant violated: StoppedNotAlive" }
         check(checkAliveConsistency()) { "Invariant violated: AliveConsistency" }
+
+        // ActorHierarchy invariants
+        check(checkChildParentConsistency()) { "Invariant violated: ChildParentConsistency in '$name'" }
+        check(checkStoppedHasNoChildren()) { "Invariant violated: StoppedHasNoChildren — '$name' is stopped but has ${children.size} children" }
+        check(checkNoCycles()) { "Invariant violated: NoCycles — '$name' is its own parent" }
+
+        // DeathWatch invariants
+        check(checkNoSelfWatch()) { "Invariant violated: NoSelfWatch — '$name' watches itself" }
+        check(checkDeadNotWatching()) { "Invariant violated: DeadNotWatching — '$name' is stopped but still watching ${watching.size} actors" }
+
         mailbox.checkAllInvariants()
     }
 

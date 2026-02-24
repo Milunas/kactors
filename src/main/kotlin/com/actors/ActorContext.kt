@@ -45,6 +45,7 @@ import org.slf4j.LoggerFactory
  * }
  * ```
  */
+@TlaSpec("ActorHierarchy|DeathWatch")
 class ActorContext<M : Any> internal constructor(
     /** This actor's own reference. Equivalent to Erlang's self(). */
     val self: ActorRef<M>,
@@ -77,6 +78,7 @@ class ActorContext<M : Any> internal constructor(
      * @param supervisorStrategy How to handle child failures
      * @return Type-safe reference to the spawned child
      */
+    @TlaAction("SpawnChild")
     fun <C : Any> spawn(
         name: String,
         behavior: Behavior<C>,
@@ -92,6 +94,7 @@ class ActorContext<M : Any> internal constructor(
      *
      * @throws IllegalArgumentException if ref is not a child of this actor
      */
+    @TlaAction("InitiateStop")
     fun stop(child: ActorRef<*>) {
         cell.stopChild(child)
     }
@@ -113,6 +116,7 @@ class ActorContext<M : Any> internal constructor(
      *
      * @return The same ref, for convenience
      */
+    @TlaAction("Watch")
     fun <C : Any> watch(ref: ActorRef<C>): ActorRef<C> {
         cell.watch(ref.actorCell)
         return ref
@@ -124,6 +128,7 @@ class ActorContext<M : Any> internal constructor(
      *
      * @return The same ref, for convenience
      */
+    @TlaAction("Unwatch")
     fun <C : Any> unwatch(ref: ActorRef<C>): ActorRef<C> {
         cell.unwatch(ref.actorCell)
         return ref

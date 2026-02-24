@@ -37,6 +37,7 @@ package com.actors
  * }
  * ```
  */
+@TlaSpec("ActorLifecycle")
 sealed class Signal {
 
     /**
@@ -45,6 +46,8 @@ sealed class Signal {
      *
      * Use for: resource initialization, subscribing to events,
      * spawning initial children, starting timers.
+     *
+     * TLA+ variable: preStartDelivered (ActorLifecycle.tla)
      */
     data object PreStart : Signal()
 
@@ -54,6 +57,8 @@ sealed class Signal {
      *
      * Use for: resource cleanup, unsubscribing, closing connections.
      * The actor's children have already been stopped when this fires.
+     *
+     * TLA+ variable: postStopDelivered (ActorLifecycle.tla)
      */
     data object PostStop : Signal()
 
@@ -63,6 +68,8 @@ sealed class Signal {
      *
      * The watcher receives this after calling [ActorContext.watch].
      * Contains the dead actor's ref for identification.
+     *
+     * TLA+ spec: DeathWatch.tla — Die(a) → terminated'[w] ∪= {a}
      *
      * @param ref The ActorRef that terminated
      */
@@ -75,6 +82,8 @@ sealed class Signal {
      * The parent's [SupervisorStrategy] determines what happens next.
      * This signal is delivered BEFORE the strategy is applied, giving
      * the parent a chance to react (e.g., log, update state).
+     *
+     * TLA+ spec: ActorHierarchy.tla — child failure propagation pattern
      *
      * @param ref The child ActorRef that failed
      * @param cause The exception that caused the failure

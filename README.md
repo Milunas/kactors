@@ -46,11 +46,11 @@ A formally specified Actor Model library built on Kotlin Coroutines and Channels
 | Component | File | TLA+ Spec | Description |
 |-----------|------|-----------|-------------|
 | **Mailbox** | `Mailbox.kt` | `ActorMailbox.tla` | Bounded FIFO channel (send/receive/trySend/tryReceive) |
-| **ActorCell** | `ActorCell.kt` | `ActorLifecycle.tla` | Runtime container: lifecycle FSM, select-based message loop, hierarchy management |
+| **ActorCell** | `ActorCell.kt` | `ActorLifecycle.tla` `ActorHierarchy.tla` `DeathWatch.tla` | Runtime container: lifecycle FSM, select-based message loop, hierarchy management |
 | **ActorRef** | `ActorRef.kt` | `RequestReply.tla` | Location-transparent handle: tell + ask pattern |
 | **Behavior** | `Behavior.kt` | — | Functional message handler: `(ActorContext<M>, M) → Behavior<M>` |
-| **ActorContext** | `ActorContext.kt` | — | Actor's view of the world: self, spawn, watch, stop, children |
-| **Signal** | `Signal.kt` | — | Lifecycle events: PreStart, PostStop, Terminated, ChildFailed |
+| **ActorContext** | `ActorContext.kt` | `ActorHierarchy.tla` `DeathWatch.tla` | Actor's view of the world: self, spawn, watch, stop, children |
+| **Signal** | `Signal.kt` | `ActorLifecycle.tla` `DeathWatch.tla` | Lifecycle events: PreStart, PostStop, Terminated, ChildFailed |
 | **SupervisorStrategy** | `SupervisorStrategy.kt` | `ActorLifecycle.tla` | Fault tolerance: stop/restart/resume/escalate |
 | **ActorSystem** | `ActorSystem.kt` | — | Top-level container with SupervisorJob scope |
 
@@ -58,7 +58,7 @@ A formally specified Actor Model library built on Kotlin Coroutines and Channels
 
 ## TLA+ Specifications
 
-Three modular specs, each focused and small enough for TLC model checking in under 3–4 minutes:
+Five modular specs, each focused and small enough for TLC model checking in under 3–4 minutes:
 
 ### 1. ActorMailbox.tla — Bounded Channel
 ```
@@ -68,11 +68,12 @@ Invariants: BoundedCapacity, MessageConservation, NonNegativeLength
 Config: 2 senders, capacity 3, messages 1..3 → ~30s TLC
 ```
 
-### 2. ActorLifecycle.tla — Lifecycle State Machine
+### 2. ActorLifecycle.tla — Lifecycle State Machine + Signal Ordering
 ```
-State: actorState, restartCount, processed, alive
+State: actorState, restartCount, processed, alive, preStartDelivered, postStopDelivered
 Actions: Start, BecomeRunning, ProcessMessage, Fail, FailPermanent, Restart, GracefulStop, CompleteStopping
-Invariants: RestartBudgetRespected, StoppedNotAlive, OnlyRunningProcess, AliveConsistency
+Invariants: RestartBudgetRespected, StoppedNotAlive, OnlyRunningProcess, AliveConsistency,
+            PreStartBeforeProcess, PostStopBounded, PreStartMatchesStarts, PreStartBeforePostStop
 Config: 3 actors, MaxRestarts=3 → ~30s TLC
 ```
 
@@ -82,6 +83,24 @@ State: pendingRequests, serverQueue, replies, timedOut, nextRequestId
 Actions: SendRequest(c), ProcessRequest, DeliverReply(c,rid), Timeout(c,rid)
 Invariants: MutualExclusion, NoReplyAfterTimeout, NoPhantomReplies, BoundedPending
 Config: 2 clients, MaxPending=2 → ~1-2min TLC
+```
+
+### 4. ActorHierarchy.tla — Supervision Tree + Cascading Stop
+```
+State: state, parent, children
+Actions: SpawnChild(p,c), InitiateStop(a), CascadeStop(p,c), CompleteStop(a)
+Invariants: ChildParentConsistency, NoCycles, AliveChildHasLiveParent,
+            StoppedHasNoChildren, UnspawnedIsClean, ChildrenAreSpawned
+Config: 5 actors (1 root + 4 spawnable) → ~30s TLC
+```
+
+### 5. DeathWatch.tla — Actor Monitoring
+```
+State: alive, watchers, watching, terminated
+Actions: Watch(w,target), Unwatch(w,target), Die(a)
+Invariants: NoPhantomTerminated, NoSelfWatch, AliveNotTerminatedByAlive,
+            WatchSymmetryAlive, TerminatedBounded, DeadNotWatching
+Config: 4 actors → ~1min TLC
 ```
 
 ---
@@ -118,6 +137,8 @@ The project includes `tla2tools.jar` for standalone TLC verification:
 java -cp src/main/tla/tla2tools.jar tlc2.TLC src/main/tla/ActorMailbox.tla -config src/main/tla/ActorMailbox.cfg
 java -cp src/main/tla/tla2tools.jar tlc2.TLC src/main/tla/ActorLifecycle.tla -config src/main/tla/ActorLifecycle.cfg
 java -cp src/main/tla/tla2tools.jar tlc2.TLC src/main/tla/RequestReply.tla -config src/main/tla/RequestReply.cfg
+java -cp src/main/tla/tla2tools.jar tlc2.TLC src/main/tla/ActorHierarchy.tla -config src/main/tla/ActorHierarchy.cfg
+java -cp src/main/tla/tla2tools.jar tlc2.TLC src/main/tla/DeathWatch.tla -config src/main/tla/DeathWatch.cfg
 ```
 
 Or create an alias for convenience:
@@ -126,6 +147,8 @@ alias tlc="java -cp src/main/tla/tla2tools.jar tlc2.TLC"
 tlc src/main/tla/ActorMailbox.tla -config src/main/tla/ActorMailbox.cfg
 tlc src/main/tla/ActorLifecycle.tla -config src/main/tla/ActorLifecycle.cfg
 tlc src/main/tla/RequestReply.tla -config src/main/tla/RequestReply.cfg
+tlc src/main/tla/ActorHierarchy.tla -config src/main/tla/ActorHierarchy.cfg
+tlc src/main/tla/DeathWatch.tla -config src/main/tla/DeathWatch.cfg
 ```
 
 ### Using tla2lincheck (Gradle Plugin)

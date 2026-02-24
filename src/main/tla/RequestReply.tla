@@ -90,6 +90,9 @@ Next ==
     \/ ProcessRequest
     \/ \E c \in Clients, rid \in 1..MaxPending : DeliverReply(c, rid)
     \/ \E c \in Clients, rid \in 1..MaxPending : Timeout(c, rid)
+    \* Terminal state: all requests resolved, no more to send (stutter)
+    \/ (\A c \in Clients : pendingRequests[c] = {} /\ nextRequestId[c] > MaxPending)
+       /\ UNCHANGED vars
 
 \* ─── Safety Invariants ───────────────────────────────────────────
 
