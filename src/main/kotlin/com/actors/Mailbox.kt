@@ -5,6 +5,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ChannelResult
 import org.slf4j.LoggerFactory
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * ═══════════════════════════════════════════════════════════════════
@@ -46,13 +47,11 @@ class Mailbox<M : Any>(
     @TlaVariable("mailbox")
     internal val channel: Channel<MessageEnvelope<M>> = Channel(capacity)
 
-    @Volatile
     @TlaVariable("sendCount")
-    private var totalSent: Long = 0
+    private val totalSent = AtomicLong(0)
 
-    @Volatile
     @TlaVariable("recvCount")
-    private var totalReceived: Long = 0
+    private val totalReceived = AtomicLong(0)
 
     /**
      * Suspends until the message is enqueued.
@@ -74,8 +73,8 @@ class Mailbox<M : Any>(
     ) {
         val envelope = MessageEnvelope(message, traceContext, senderPath, senderLamportTime, messageSnapshot)
         channel.send(envelope)
-        totalSent++
-        log.trace("Message enqueued (total sent: {})", totalSent)
+        totalSent.incrementAndGet()
+        log.trace("Message enqueued (total sent: {})", totalSent.get())
     }
 
     /**
@@ -100,7 +99,7 @@ class Mailbox<M : Any>(
         val envelope = MessageEnvelope(message, traceContext, senderPath, senderLamportTime, messageSnapshot)
         val result: ChannelResult<Unit> = channel.trySend(envelope)
         if (result.isSuccess) {
-            totalSent++
+            totalSent.incrementAndGet()
             return true
         }
         log.trace("Mailbox full, trySend failed (capacity: {})", capacity)
@@ -115,7 +114,7 @@ class Mailbox<M : Any>(
     @TlaAction("Receive")
     suspend fun receive(): M {
         val envelope = channel.receive()
-        totalReceived++
+        totalReceived.incrementAndGet()
         return envelope.message
     }
 
@@ -125,7 +124,7 @@ class Mailbox<M : Any>(
      * the direct receive() method.
      */
     internal fun onReceived() {
-        totalReceived++
+        totalReceived.incrementAndGet()
     }
 
     /**
@@ -137,7 +136,7 @@ class Mailbox<M : Any>(
     fun tryReceive(): M? {
         val result = channel.tryReceive()
         if (result.isSuccess) {
-            totalReceived++
+            totalReceived.incrementAndGet()
             return result.getOrNull()?.message
         }
         return null
@@ -149,7 +148,7 @@ class Mailbox<M : Any>(
      */
     fun close() {
         channel.close()
-        log.debug("Mailbox closed (sent: {}, received: {})", totalSent, totalReceived)
+        log.debug("Mailbox closed (sent: {}, received: {})", totalSent.get(), totalReceived.get())
     }
 
     @OptIn(DelicateCoroutinesApi::class)
@@ -163,16 +162,16 @@ class Mailbox<M : Any>(
     fun checkBoundedCapacity(): Boolean = true // Channel enforces this structurally
 
     @TlaInvariant("MessageConservation")
-    fun checkMessageConservation(): Boolean = totalReceived <= totalSent
+    fun checkMessageConservation(): Boolean = totalReceived.get() <= totalSent.get()
 
     @TlaInvariant("NonNegativeLength")
     fun checkNonNegativeLength(): Boolean = true // Channel structurally guarantees this
 
     fun checkAllInvariants() {
         check(checkBoundedCapacity()) { "Invariant violated: BoundedCapacity" }
-        check(checkMessageConservation()) { "Invariant violated: MessageConservation — received=$totalReceived > sent=$totalSent" }
+        check(checkMessageConservation()) { "Invariant violated: MessageConservation — received=${totalReceived.get()} > sent=${totalSent.get()}" }
         check(checkNonNegativeLength()) { "Invariant violated: NonNegativeLength" }
     }
 
-    override fun toString(): String = "Mailbox(capacity=$capacity, sent=$totalSent, received=$totalReceived)"
+    override fun toString(): String = "Mailbox(capacity=$capacity, sent=${totalSent.get()}, received=${totalReceived.get()})"
 }

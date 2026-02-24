@@ -124,18 +124,36 @@ inline fun <M : Any> lifecycleBehavior(
 }
 
 /**
- * Creates a stateful behavior using a closure for state.
- * Each call to the factory creates a fresh behavior with its own state.
+ * Creates a stateful behavior using functional state transitions.
+ * Each message handler receives the current state and returns a new
+ * behavior — the state is captured in the closure, following the
+ * immutable behavior pattern required by AGENTS.md §4.
+ *
+ * The returned Behavior<M> wraps the handler so that when a message
+ * is processed, the handler can return either:
+ *   - `statefulBehavior(newState) { ... }` to transition to new state
+ *   - `Behavior.same()` to keep current state
+ *   - `Behavior.stopped()` to terminate the actor
  *
  * Example:
  * ```kotlin
  * fun counter(initial: Int = 0): Behavior<CounterMsg> = statefulBehavior(initial) { count, msg ->
  *     when (msg) {
- *         is Increment -> counter(count + msg.n)
+ *         is Increment -> statefulBehavior(count + msg.n) { s, m -> ... }
  *         is GetCount -> {
  *             msg.replyTo.tell(count)
  *             Behavior.same()
  *         }
+ *     }
+ * }
+ * ```
+ *
+ * NOTE: For most use cases, the functional recursion pattern is clearer:
+ * ```kotlin
+ * fun counter(count: Int = 0): Behavior<CounterMsg> = receive { ctx, msg ->
+ *     when (msg) {
+ *         is Increment -> counter(count + msg.n)
+ *         is GetCount -> { msg.replyTo.tell(count); Behavior.same() }
  *     }
  * }
  * ```
@@ -144,10 +162,8 @@ inline fun <M : Any, S> statefulBehavior(
     initialState: S,
     crossinline handler: suspend (state: S, message: M) -> Behavior<M>
 ): Behavior<M> {
-    var state = initialState
     return Behavior { _, msg ->
-        val next = handler(state, msg)
-        next
+        handler(initialState, msg)
     }
 }
 

@@ -137,6 +137,9 @@ class ActorCell<M : Any>(
     internal val childRefs: Set<ActorRef<*>>
         get() = children.values.map { it.ref }.toSet()
 
+    /** Read-only view of child cells for observability (ActorTreeDumper). */
+    internal fun childCells(): Collection<ActorCell<*>> = children.values
+
     // ─── DeathWatch ──────────────────────────────────────────────
 
     /** Actors watching this actor (notified on termination). */
@@ -462,7 +465,10 @@ class ActorCell<M : Any>(
             initialBehavior = behavior,
             mailbox = childMailbox,
             supervisorStrategy = supervisorStrategy,
-            parent = this
+            parent = this,
+            traceCapacity = this.traceCapacity,
+            slowMessageThresholdMs = this.slowMessageThresholdMs,
+            enableMessageSnapshots = this.enableMessageSnapshots
         )
 
         children[localName] = childCell

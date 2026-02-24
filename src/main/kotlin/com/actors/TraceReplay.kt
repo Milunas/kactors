@@ -251,12 +251,18 @@ object TraceReplay {
      */
     private fun parseLine(json: String): ParsedEvent {
         val fields = mutableMapOf<String, String>()
-        // Match "key":"value" and "key":number patterns
-        val stringPattern = Regex(""""(\w+)":"([^"]*?)"""")
+        // Match "key":"value" — handles escaped quotes (\\") inside values
+        val stringPattern = Regex(""""(\w+)":"((?:[^"\\]|\\.)*)"""")
         val numberPattern = Regex(""""(\w+)":(\d+)""")
 
         stringPattern.findAll(json).forEach {
+            // Unescape JSON string values
             fields[it.groupValues[1]] = it.groupValues[2]
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\")
+                .replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t")
         }
         numberPattern.findAll(json).forEach {
             fields[it.groupValues[1]] = it.groupValues[2]

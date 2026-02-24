@@ -138,49 +138,15 @@ object ActorTreeDumper {
         sb.append("$indent}")
     }
 
-    // ─── Reflection-Free Access to Internal State ────────────────
-    // These methods access ActorCell internals via internal visibility.
-    // This is acceptable because ActorTreeDumper is in the same package.
+    // ─── Internal Access (no reflection) ───────────────────────────
+    // These methods access ActorCell/ActorSystem internals via internal visibility.
+    // This is safe because ActorTreeDumper is in the same module.
 
-    @Suppress("UNCHECKED_CAST")
     private fun getTopLevelCells(system: ActorSystem): List<ActorCell<*>> {
-        // Access via actorNames + looking up each actor's cell through its ref
-        // Since we can't directly access ActorSystem.actors map,
-        // we use the public actorNames API + spawn tracking
-        return system.actorNames.mapNotNull { name ->
-            // We need to go through the ref to get the cell
-            // This is a monitoring-only path, acceptable to use internal access
-            try {
-                getActorCell(system, name)
-            } catch (_: Exception) {
-                null
-            }
-        }.sortedBy { it.name }
-    }
-
-    private fun getActorCell(system: ActorSystem, name: String): ActorCell<*>? {
-        // Access the actors map reflectively for the tree dump
-        // This is monitoring-only code, not production message path
-        return try {
-            val field = ActorSystem::class.java.getDeclaredField("actors")
-            field.isAccessible = true
-            @Suppress("UNCHECKED_CAST")
-            val actors = field.get(system) as java.util.concurrent.ConcurrentHashMap<String, ActorCell<*>>
-            actors[name]
-        } catch (_: Exception) {
-            null
-        }
+        return system.topLevelCells().sortedBy { it.name }
     }
 
     private fun getChildren(cell: ActorCell<*>): List<ActorCell<*>> {
-        return try {
-            val field = ActorCell::class.java.getDeclaredField("children")
-            field.isAccessible = true
-            @Suppress("UNCHECKED_CAST")
-            val children = field.get(cell) as java.util.concurrent.ConcurrentHashMap<String, ActorCell<*>>
-            children.values.sortedBy { it.name }
-        } catch (_: Exception) {
-            emptyList()
-        }
+        return cell.childCells().sortedBy { it.name }
     }
 }

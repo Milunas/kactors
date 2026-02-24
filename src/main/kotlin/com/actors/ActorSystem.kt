@@ -43,6 +43,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   - Remote ActorRef routing
  *   - Actor migration between nodes
  */
+@TlaSpec("ActorLifecycle|ActorHierarchy")
 class ActorSystem(
     val name: String,
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default
@@ -85,7 +86,6 @@ class ActorSystem(
         supervisorStrategy: SupervisorStrategy = SupervisorStrategy.restart()
     ): ActorRef<M> {
         check(!terminated.get()) { "Cannot spawn actor in terminated ActorSystem '${this.name}'" }
-        check(!actors.containsKey(name)) { "Actor with name '$name' already exists" }
 
         val mailbox = Mailbox<M>(mailboxCapacity)
         val cell = ActorCell(
@@ -96,7 +96,8 @@ class ActorSystem(
             parent = null  // Top-level: no parent
         )
 
-        actors[name] = cell
+        val existing = actors.putIfAbsent(name, cell)
+        check(existing == null) { "Actor with name '$name' already exists in system '${this.name}'" }
         cell.start(scope, this)
         log.info("Spawned actor '{}/{}' (mailbox={}, supervisor={})",
             this.name, name, mailboxCapacity, supervisorStrategy)
@@ -105,10 +106,54 @@ class ActorSystem(
     }
 
     /**
+     * Spawn a new top-level actor with the given behavior and [ActorConfig].
+     *
+     * This is the preferred overload for production use — it accepts an
+     * [ActorConfig] that bundles all tunable parameters.
+     *
+     * Example:
+     * ```kotlin
+     * val config = ActorConfig(mailboxCapacity = 64, enableMessageSnapshots = true)
+     * val ref = system.spawn("worker", workerBehavior(), config)
+     * ```
+     *
+     * @param name Unique name for the actor
+     * @param behavior The initial message handling behavior
+     * @param config Actor configuration bundle
+     * @return Type-safe reference to the spawned actor
+     */
+    fun <M : Any> spawn(
+        name: String,
+        behavior: Behavior<M>,
+        config: ActorConfig
+    ): ActorRef<M> {
+        check(!terminated.get()) { "Cannot spawn actor in terminated ActorSystem '${this.name}'" }
+
+        val mailbox = Mailbox<M>(config.mailboxCapacity)
+        val cell = ActorCell(
+            name = "${this.name}/$name",
+            initialBehavior = behavior,
+            mailbox = mailbox,
+            supervisorStrategy = config.supervisorStrategy,
+            parent = null,
+            traceCapacity = config.traceCapacity,
+            slowMessageThresholdMs = config.slowMessageThresholdMs,
+            enableMessageSnapshots = config.enableMessageSnapshots
+        )
+
+        val existing = actors.putIfAbsent(name, cell)
+        check(existing == null) { "Actor with name '$name' already exists in system '${this.name}'" }
+        cell.start(scope, this)
+        log.info("Spawned actor '{}/{}' (config={})", this.name, name, config)
+
+        return cell.ref
+    }
+
+    /**
      * Stop a specific actor by name.
      */
     fun stop(actorName: String) {
-        val cell = actors[actorName]
+        val cell = actors.remove(actorName)
             ?: throw IllegalArgumentException("No actor named '$actorName' in system '$name'")
         cell.stop()
         log.info("Stopped actor '{}/{}'", name, actorName)
@@ -237,6 +282,14 @@ class ActorSystem(
         }
         writer.flush()
     }
+
+    // ─── Internal Access for Observability ────────────────────
+
+    /**
+     * Internal access to top-level actor cells for tree dumping.
+     * Used by [ActorTreeDumper] — avoids reflection.
+     */
+    internal fun topLevelCells(): Collection<ActorCell<*>> = actors.values
 
     override fun toString(): String = "ActorSystem($name, actors=${actors.size})"
 }

@@ -19,6 +19,7 @@ import org.slf4j.LoggerFactory
  *   - Resume:  skip the failed message, keep current behavior
  *   - Escalate: propagate failure to parent (future: supervision trees)
  */
+@TlaSpec("ActorLifecycle")
 class SupervisorStrategy private constructor(
     val directive: Directive,
     val maxRestarts: Int = 0,

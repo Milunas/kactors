@@ -124,9 +124,9 @@ class ActorFlightRecorder(
                 events.removeFirst() // Evict oldest (ring buffer semantics)
             }
             events.addLast(event)
+            totalEventCount.incrementAndGet()
+            lamportClock.incrementAndGet()
         }
-        totalEventCount.incrementAndGet()
-        lamportClock.incrementAndGet()
     }
 
     /**
@@ -345,10 +345,14 @@ class ActorFlightRecorder(
 
     /**
      * Escape a string for safe JSON embedding.
-     * Handles quotes, backslashes, and newlines.
+     * Handles backslashes, quotes, and control characters.
      */
     private fun escapeJson(s: String): String =
-        s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r")
+        s.replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
 
     // ─── NDJSON Export (Replayability) ─────────────────────────────
 

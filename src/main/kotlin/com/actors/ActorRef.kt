@@ -26,6 +26,7 @@ import kotlin.time.Duration.Companion.seconds
  *     route to a remote node (future extension)
  *   - Serializable (future): for actor discovery across nodes
  */
+@TlaSpec("RequestReply|ActorMailbox")
 class ActorRef<M : Any> internal constructor(
     val name: String,
     internal val mailbox: Mailbox<M>,

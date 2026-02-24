@@ -31,6 +31,7 @@ package com.actors
  *     .onSignal { ctx, signal -> ... }
  * ```
  */
+@TlaSpec("ActorLifecycle")
 fun interface Behavior<M : Any> {
 
     /**

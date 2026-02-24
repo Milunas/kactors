@@ -23,6 +23,7 @@ package com.actors
  *                                                    ▼          ▼
  *                                                 STARTING   STOPPED
  */
+@TlaSpec("ActorLifecycle")
 enum class ActorState {
     /** Actor created but not yet started. TLA+: "created" */
     CREATED,
