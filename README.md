@@ -56,6 +56,9 @@ A formally specified Actor Model library built on Kotlin Coroutines and Channels
 | **TraceEvent** | `TraceEvent.kt` | `ActorTrace.tla` | Coalgebraic observable events: messages, signals, state changes, failures, slow msgs |
 | **ActorFlightRecorder** | `ActorFlightRecorder.kt` | `ActorTrace.tla` | Bounded ring buffer of trace events with Lamport clocks and invariant checks |
 | **ActorTreeDumper** | `ActorTreeDumper.kt` | — | Supervision tree visualization (ASCII + JSON) |
+| **TraceContext** | `TraceContext.kt` | `ActorTrace.tla` | Distributed tracing correlation (traceId/spanId/parentSpanId), auto-propagated across actors |
+| **MessageEnvelope** | `MessageEnvelope.kt` | `ActorTrace.tla` | Internal metadata wrapper carrying trace context + sender info with every message |
+| **TraceReplay** | `TraceReplay.kt` | `ActorTrace.tla` | Post-mortem trace analysis: NDJSON load, causal chain reconstruction, message flow graphs |
 
 ---
 
@@ -108,11 +111,12 @@ Config: 4 actors → ~1min TLC
 
 ### 6. ActorTrace.tla — Coalgebraic Trace Buffer (Flight Recorder)
 ```
-State: trace (Seq of EventTypes), eventCount, actorAlive, lamportClock
-Actions: RecordEvent(a, e), StopActor(a)
+State: trace (Seq of EventTypes), eventCount, actorAlive, lamportClock, lastSender
+Actions: RecordEvent(a, e), StopActor(a), SendMessage(sender, receiver)
 Invariants: BoundedTrace, NonNegativeEventCount, DeadActorTraceImmutable,
-            TraceLengthBounded, TraceLengthConsistency, LamportClockMonotonic
-Config: 2 actors, MaxBufferSize=4, MaxEvents=4 → ~2s TLC
+            TraceLengthBounded, TraceLengthConsistency, LamportClockMonotonic,
+            LamportClockNonNegative
+Config: 2 actors, MaxBufferSize=4, MaxEvents=4 → ~6s TLC
 ```
 
 ---
@@ -408,7 +412,59 @@ val debuggableActor = receive<DebugMsg> { ctx, msg ->
 
 **Recorded events:** MessageReceived, MessageSent, SignalDelivered,
 StateChanged, BehaviorChanged, ChildSpawned, ChildStopped,
-WatchRegistered, FailureHandled, SlowMessageWarning
+WatchRegistered, FailureHandled, SlowMessageWarning, CustomEvent
+
+### Cross-Actor Distributed Tracing
+
+Every `tell()` and `ask()` automatically propagates trace context (traceId, spanId, parentSpanId)
+across actor boundaries. No manual instrumentation needed:
+
+```kotlin
+// Actor A sends to B → B sends to C
+// Each hop creates a child span with the same traceId
+// The full causal chain A→B→C is reconstructible from the flight recorder
+val actorA = system.spawn("a", receive<Msg> { ctx, msg ->
+    bRef.tell(ForwardToC(cRef))  // Trace context propagated automatically
+    Behavior.same()
+})
+```
+
+### Structured Logging (ctx.trace/debug/info/warn/error)
+
+Log from within actors and get events recorded in BOTH SLF4J AND the flight recorder:
+
+```kotlin
+val orderActor = receive<OrderMsg> { ctx, msg ->
+    ctx.info("Processing order", "orderId" to msg.id, "amount" to msg.total.toString())
+    // → SLF4J: actor.system/orders - Processing order
+    // → FlightRecorder: CustomEvent(INFO, "Processing order", {orderId=..., amount=...})
+    ctx.warn("Inventory low", "sku" to msg.sku)
+    Behavior.same()
+}
+```
+
+### NDJSON Export & Replay
+
+Export traces to NDJSON (one JSON per line) for post-mortem analysis.
+Transfer from production to development and reconstruct the full timeline:
+
+```kotlin
+// On prod: export traces
+val ndjson = system.exportAllTracesNdjson()
+File("trace.ndjson").writeText(ndjson)
+
+// On dev: analyze
+val events = TraceReplay.loadNdjson(File("trace.ndjson").readText())
+TraceReplay.printTimeline(events)           // Unified timeline sorted by Lamport clock
+TraceReplay.printMessageFlow(events)         // Who talked to whom, how many times
+TraceReplay.printCausalChain(events, "abc")  // Full causal chain for trace "abc"
+TraceReplay.printFailures(events)            // All failures with context
+
+// Group and filter
+val byActor = TraceReplay.groupByActor(events)
+val byTrace = TraceReplay.groupByTrace(events)
+val flow = TraceReplay.messageFlow(events)   // Map<(sender, receiver), count>
+```
 
 ---
 
@@ -424,6 +480,7 @@ WatchRegistered, FailureHandled, SlowMessageWarning
 | `ActorHierarchyTest` | JUnit 5 unit tests | — | Parent-child spawning, cascading stop, context.stop(child) |
 | `SignalTest` | JUnit 5 unit tests | — | PreStart, PostStop, Terminated, ChildFailed, DeathWatch, setup/receive DSL |
 | `ActorTraceTest` | JUnit 5 + concurrent stress | `ActorTrace.tla` | Flight recorder, ring buffer eviction, Lamport clocks, tree dump, slow message detection |
+| `TraceabilityTest` | JUnit 5 + concurrent stress | `ActorTrace.tla` | Cross-actor trace propagation, structured logging (ctx.info/warn/error), NDJSON export/import round-trip, TraceReplay analysis, Lamport clock sync, MessageEnvelope metadata |
 
 ---
 

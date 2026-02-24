@@ -8,6 +8,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 
 /**
  * ═══════════════════════════════════════════════════════════════════
@@ -54,7 +56,8 @@ class ActorCell<M : Any>(
     private val supervisorStrategy: SupervisorStrategy,
     private val parent: ActorCell<*>? = null,
     private val traceCapacity: Int = ActorFlightRecorder.DEFAULT_CAPACITY,
-    private val slowMessageThresholdMs: Long = DEFAULT_SLOW_MESSAGE_THRESHOLD_MS
+    private val slowMessageThresholdMs: Long = DEFAULT_SLOW_MESSAGE_THRESHOLD_MS,
+    internal val enableMessageSnapshots: Boolean = false
 ) {
     companion object {
         private val log = LoggerFactory.getLogger(ActorCell::class.java)
@@ -99,7 +102,17 @@ class ActorCell<M : Any>(
      * TLA+ Spec: ActorTrace.tla — trace variable
      */
     val flightRecorder = ActorFlightRecorder(traceCapacity)
-
+    /**
+     * Current trace context for this actor, updated on each message receipt.
+     * Enables trace propagation: when this actor sends a message to another,
+     * the current trace context is captured and forwarded via MessageEnvelope.
+     *
+     * This is the actor's "current span" — it changes with each message.
+     * Safe to read without synchronization because actors process messages
+     * sequentially (single-writer coroutine).
+     */
+    @Volatile
+    internal var currentTraceContext: TraceContext = TraceContext.EMPTY
     // ─── Actor Identity ──────────────────────────────────────────
 
     /** The ActorRef for this cell — created eagerly. */
@@ -169,7 +182,7 @@ class ActorCell<M : Any>(
         // Create context (self ref already available)
         context = ActorContext(ref, actorSystem, this)
 
-        job = scope.launch(CoroutineName("actor-$name")) {
+        job = scope.launch(CoroutineName("actor-$name") + ActorTraceElement(name, this)) {
             try {
                 // Unwrap SetupBehavior: run factory to initialize
                 if (currentBehavior is SetupBehavior<M>) {
@@ -205,7 +218,7 @@ class ActorCell<M : Any>(
 
         @OptIn(DelicateCoroutinesApi::class)
         val scope = GlobalScope
-        job = scope.launch(CoroutineName("actor-$name")) {
+        job = scope.launch(CoroutineName("actor-$name") + ActorTraceElement(name, this)) {
             try {
                 if (currentBehavior is SetupBehavior<M>) {
                     currentBehavior = (currentBehavior as SetupBehavior<M>).factory(context)
@@ -244,12 +257,28 @@ class ActorCell<M : Any>(
                         val result = deliverSignal(signal)
                         handleBehaviorResult(result)
                     }
-                    mailbox.channel.onReceive { message ->
+                    mailbox.channel.onReceive { envelope ->
                         mailbox.onReceived()
 
-                        // Record message receipt in flight recorder
+                        val message = envelope.message
                         val messageType = message!!::class.simpleName ?: "Unknown"
-                        recordMessageReceived(messageType)
+
+                        // Update Lamport clock for causal ordering (cross-actor)
+                        if (envelope.senderLamportTime > 0) {
+                            flightRecorder.updateLamportClock(envelope.senderLamportTime)
+                        }
+
+                        // Update current trace context from envelope
+                        currentTraceContext = envelope.traceContext?.newChildSpan()
+                            ?: TraceContext.create()
+
+                        // Record message receipt with sender info
+                        recordMessageReceived(
+                            messageType = messageType,
+                            senderPath = envelope.senderPath,
+                            traceContext = currentTraceContext,
+                            messageContent = envelope.messageSnapshot
+                        )
 
                         // Process with slow message detection
                         val startTimeNs = System.nanoTime()
@@ -688,15 +717,24 @@ class ActorCell<M : Any>(
 
     /**
      * Record a message receipt in the flight recorder.
+     * Enriched with sender information from the MessageEnvelope.
      * TLA+ action: RecordEvent(a, "msg_received")
      */
-    private fun recordMessageReceived(messageType: String) {
+    private fun recordMessageReceived(
+        messageType: String,
+        senderPath: String? = null,
+        traceContext: TraceContext? = null,
+        messageContent: String? = null
+    ) {
         flightRecorder.record(TraceEvent.MessageReceived(
             actorPath = name,
             timestamp = java.time.Instant.now(),
             lamportTimestamp = flightRecorder.nextLamportTimestamp(),
             messageType = messageType,
-            mailboxSizeAfter = 0 // approximate — exact size requires experimental API
+            mailboxSizeAfter = 0, // approximate — exact size requires experimental API
+            senderPath = senderPath,
+            traceContext = traceContext,
+            messageContent = messageContent
         ))
     }
 
@@ -796,5 +834,22 @@ class ActorCell<M : Any>(
     }
 
     override fun toString(): String = "ActorCell($name, state=${stateRef.get()}, children=${children.size})"
+}
+
+/**
+ * Coroutine context element that identifies the currently executing actor.
+ * Added to the actor's coroutine context on launch, enabling:
+ *   - ActorRef.tell() to identify the sender (for trace correlation)
+ *   - Cross-actor Lamport clock synchronization
+ *   - Automatic TraceContext propagation
+ *
+ * This element is readable via `coroutineContext[ActorTraceElement]`
+ * from any suspend function called within an actor's message handler.
+ */
+internal class ActorTraceElement(
+    val actorPath: String,
+    val cell: ActorCell<*>
+) : AbstractCoroutineContextElement(Key) {
+    companion object Key : CoroutineContext.Key<ActorTraceElement>
 }
 

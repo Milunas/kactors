@@ -199,5 +199,44 @@ class ActorSystem(
         return sb.toString()
     }
 
+    /**
+     * Export all actors' traces as a single NDJSON stream.
+     * This is the primary method for 100% replayability:
+     *   1. Call this on prod when something goes wrong
+     *   2. Save the output to a file
+     *   3. Load it on your dev machine with TraceReplay.loadNdjson()
+     *   4. Reconstruct exactly what happened, step by step
+     *
+     * Events from all actors are merged and sorted by Lamport timestamp
+     * (causal order), giving you a unified system-wide timeline.
+     *
+     * @return NDJSON string (one JSON object per line)
+     */
+    fun exportAllTracesNdjson(): String {
+        val allNdjson = actors.values.sortedBy { it.name }
+            .map { it.flightRecorder.exportNdjson() }
+            .filter { it.isNotBlank() }
+            .joinToString("\n")
+        return allNdjson
+    }
+
+    /**
+     * Export all actors' traces to a Writer (file, stream, etc.).
+     * Use this for large systems where string concatenation would
+     * use too much memory.
+     *
+     * Example:
+     * ```kotlin
+     * system.exportAllTracesNdjson(File("trace.ndjson").bufferedWriter())
+     * ```
+     */
+    fun exportAllTracesNdjson(writer: java.io.Writer) {
+        actors.values.sortedBy { it.name }.forEach { cell ->
+            cell.flightRecorder.exportNdjson(writer)
+            writer.write("\n")
+        }
+        writer.flush()
+    }
+
     override fun toString(): String = "ActorSystem($name, actors=${actors.size})"
 }

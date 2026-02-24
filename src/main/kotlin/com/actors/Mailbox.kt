@@ -28,6 +28,11 @@ import org.slf4j.LoggerFactory
  *   INV-1 BoundedCapacity:    len(mailbox) ≤ capacity
  *   INV-2 MessageConservation: received ≤ total_sent
  *   INV-3 NonNegativeLength:  len(mailbox) ≥ 0
+ *
+ * Internally, messages are wrapped in [MessageEnvelope] to carry
+ * trace metadata (sender path, Lamport timestamp, TraceContext)
+ * without changing the user-facing API. The envelope is unwrapped
+ * by [ActorCell] before delivering to the behavior.
  */
 @TlaSpec("ActorMailbox")
 class Mailbox<M : Any>(
@@ -39,7 +44,7 @@ class Mailbox<M : Any>(
     }
 
     @TlaVariable("mailbox")
-    internal val channel: Channel<M> = Channel(capacity)
+    internal val channel: Channel<MessageEnvelope<M>> = Channel(capacity)
 
     @Volatile
     @TlaVariable("sendCount")
@@ -52,10 +57,23 @@ class Mailbox<M : Any>(
     /**
      * Suspends until the message is enqueued.
      * Corresponds to TLA+ action: Send(s)
+     *
+     * @param message The message to send
+     * @param traceContext Trace context from the sender (null if external)
+     * @param senderPath Path of the sending actor (null if external)
+     * @param senderLamportTime Sender's Lamport timestamp at send time
+     * @param messageSnapshot Optional toString() capture for replay
      */
     @TlaAction("Send")
-    suspend fun send(message: M) {
-        channel.send(message)
+    suspend fun send(
+        message: M,
+        traceContext: TraceContext? = null,
+        senderPath: String? = null,
+        senderLamportTime: Long = 0,
+        messageSnapshot: String? = null
+    ) {
+        val envelope = MessageEnvelope(message, traceContext, senderPath, senderLamportTime, messageSnapshot)
+        channel.send(envelope)
         totalSent++
         log.trace("Message enqueued (total sent: {})", totalSent)
     }
@@ -64,10 +82,23 @@ class Mailbox<M : Any>(
      * Attempts to enqueue without suspending.
      * Returns true if successful, false if mailbox is full.
      * Corresponds to TLA+ actions: Send(s) + TrySendFull(s)
+     *
+     * @param message The message to send
+     * @param traceContext Trace context from the sender (null if external)
+     * @param senderPath Path of the sending actor (null if external)
+     * @param senderLamportTime Sender's Lamport timestamp at send time
+     * @param messageSnapshot Optional toString() capture for replay
      */
     @TlaAction("Send|TrySendFull")
-    fun trySend(message: M): Boolean {
-        val result: ChannelResult<Unit> = channel.trySend(message)
+    fun trySend(
+        message: M,
+        traceContext: TraceContext? = null,
+        senderPath: String? = null,
+        senderLamportTime: Long = 0,
+        messageSnapshot: String? = null
+    ): Boolean {
+        val envelope = MessageEnvelope(message, traceContext, senderPath, senderLamportTime, messageSnapshot)
+        val result: ChannelResult<Unit> = channel.trySend(envelope)
         if (result.isSuccess) {
             totalSent++
             return true
@@ -78,13 +109,14 @@ class Mailbox<M : Any>(
 
     /**
      * Suspends until a message is available.
+     * Unwraps the internal envelope — callers get the raw message.
      * Corresponds to TLA+ action: Receive
      */
     @TlaAction("Receive")
     suspend fun receive(): M {
-        val msg = channel.receive()
+        val envelope = channel.receive()
         totalReceived++
-        return msg
+        return envelope.message
     }
 
     /**
@@ -106,7 +138,7 @@ class Mailbox<M : Any>(
         val result = channel.tryReceive()
         if (result.isSuccess) {
             totalReceived++
-            return result.getOrNull()
+            return result.getOrNull()?.message
         }
         return null
     }

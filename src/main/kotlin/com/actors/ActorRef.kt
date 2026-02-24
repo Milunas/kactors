@@ -3,6 +3,8 @@ package com.actors
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
 import org.slf4j.LoggerFactory
+import java.time.Instant
+import kotlin.coroutines.coroutineContext
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
@@ -37,16 +39,52 @@ class ActorRef<M : Any> internal constructor(
      * Fire-and-forget: enqueue a message into the actor's mailbox.
      * Suspends if the mailbox is full (backpressure).
      *
+     * Automatically captures the sender's identity from the coroutine context
+     * (if called from within an actor's message handler) and propagates:
+     *   - Sender path (for "who sent what to whom" tracing)
+     *   - Sender's Lamport timestamp (for causal ordering)
+     *   - TraceContext (for distributed trace correlation)
+     *   - Optional message snapshot (if enabled on sender)
+     *
      * TLA+ action: Send(s) in ActorMailbox.tla
      */
     @TlaAction("Send")
     suspend fun tell(message: M) {
-        mailbox.send(message)
+        // Capture sender info from coroutine context (if inside an actor)
+        val senderElement = coroutineContext[ActorTraceElement]
+        val senderPath = senderElement?.actorPath
+        val senderCell = senderElement?.cell
+        val senderLamport = senderCell?.flightRecorder?.currentLamportTime ?: 0
+        val traceCtx = senderCell?.currentTraceContext
+        val snapshot = if (senderCell?.enableMessageSnapshots == true) message.toString() else null
+
+        // Record MessageSent in sender's flight recorder
+        if (senderCell != null) {
+            val childSpan = traceCtx?.newChildSpan()
+            senderCell.flightRecorder.record(TraceEvent.MessageSent(
+                actorPath = senderPath ?: "",
+                timestamp = Instant.now(),
+                lamportTimestamp = senderCell.flightRecorder.nextLamportTimestamp(),
+                targetPath = name,
+                messageType = message::class.simpleName ?: "Unknown",
+                traceContext = childSpan,
+                messageContent = snapshot
+            ))
+            // Send with trace context
+            mailbox.send(message, childSpan, senderPath, senderLamport, snapshot)
+        } else {
+            // External sender (test code, main thread) — no trace context
+            mailbox.send(message)
+        }
     }
 
     /**
      * Non-blocking tell: attempts to enqueue without suspension.
      * Returns false if the mailbox is full.
+     *
+     * Note: since this is non-suspend, it cannot capture the sender's
+     * coroutine context. Trace metadata will be absent for trySend calls.
+     * For full tracing, prefer the suspend `tell()` method.
      *
      * TLA+ action: Send(s) | TrySendFull(s) in ActorMailbox.tla
      */
@@ -81,7 +119,31 @@ class ActorRef<M : Any> internal constructor(
         val deferred = CompletableDeferred<R>()
         val replyRef = createReplyRef<R>(deferred)
         val message = messageFactory(replyRef)
-        tell(message)
+
+        // Capture sender info for the ask request (same as tell)
+        val senderElement = coroutineContext[ActorTraceElement]
+        val senderCell = senderElement?.cell
+        val senderPath = senderElement?.actorPath
+        val senderLamport = senderCell?.flightRecorder?.currentLamportTime ?: 0
+        val traceCtx = senderCell?.currentTraceContext
+        val snapshot = if (senderCell?.enableMessageSnapshots == true) message.toString() else null
+
+        if (senderCell != null) {
+            val childSpan = traceCtx?.newChildSpan()
+            senderCell.flightRecorder.record(TraceEvent.MessageSent(
+                actorPath = senderPath ?: "",
+                timestamp = Instant.now(),
+                lamportTimestamp = senderCell.flightRecorder.nextLamportTimestamp(),
+                targetPath = name,
+                messageType = message::class.simpleName ?: "Unknown",
+                traceContext = childSpan,
+                messageContent = snapshot
+            ))
+            mailbox.send(message, childSpan, senderPath, senderLamport, snapshot)
+        } else {
+            mailbox.send(message)
+        }
+
         return withTimeout(timeout) {
             deferred.await()
         }

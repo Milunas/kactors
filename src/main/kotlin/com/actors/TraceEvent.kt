@@ -65,13 +65,19 @@ sealed class TraceEvent {
      *
      * @param messageType Simple class name of the message (never the content — no PII leakage)
      * @param mailboxSizeAfter Mailbox occupancy after dequeue (backpressure indicator)
+     * @param senderPath Full path of the sending actor (null if sent from outside actor system)
+     * @param traceContext Distributed trace context propagated from sender (null if no trace active)
+     * @param messageContent Optional toString() snapshot for replay (null in production by default)
      */
     data class MessageReceived(
         override val actorPath: String,
         override val timestamp: Instant,
         override val lamportTimestamp: Long,
         val messageType: String,
-        val mailboxSizeAfter: Int
+        val mailboxSizeAfter: Int,
+        val senderPath: String? = null,
+        val traceContext: TraceContext? = null,
+        val messageContent: String? = null
     ) : TraceEvent()
 
     /**
@@ -80,13 +86,17 @@ sealed class TraceEvent {
      *
      * @param targetPath The destination actor's path
      * @param messageType Simple class name of the message
+     * @param traceContext Distributed trace context for this send (the child span)
+     * @param messageContent Optional toString() snapshot for replay (null in production by default)
      */
     data class MessageSent(
         override val actorPath: String,
         override val timestamp: Instant,
         override val lamportTimestamp: Long,
         val targetPath: String,
-        val messageType: String
+        val messageType: String,
+        val traceContext: TraceContext? = null,
+        val messageContent: String? = null
     ) : TraceEvent()
 
     // ─── Signal Events ───────────────────────────────────────────
@@ -223,4 +233,37 @@ sealed class TraceEvent {
         val durationMs: Long,
         val thresholdMs: Long
     ) : TraceEvent()
+
+    // ─── User-Defined Events ─────────────────────────────────────
+
+    /**
+     * A custom event recorded by user code via `ctx.trace()`, `ctx.debug()`,
+     * `ctx.info()`, `ctx.warn()`, or `ctx.error()`.
+     *
+     * This bridges the gap between the automatic flight recorder and
+     * user-defined logging: every custom log statement is simultaneously
+     * written to SLF4J AND recorded in the flight recorder, creating
+     * a unified timeline of system events and application-level events.
+     *
+     * @param level Log level: TRACE, DEBUG, INFO, WARN, ERROR
+     * @param message The log message (formatted)
+     * @param traceContext Current trace context (if any)
+     * @param extra Optional structured key-value pairs for machine-readable data
+     */
+    data class CustomEvent(
+        override val actorPath: String,
+        override val timestamp: Instant,
+        override val lamportTimestamp: Long,
+        val level: LogLevel,
+        val message: String,
+        val traceContext: TraceContext? = null,
+        val extra: Map<String, String> = emptyMap()
+    ) : TraceEvent()
+
+    /**
+     * Log levels for custom events, mapping directly to SLF4J levels.
+     */
+    enum class LogLevel {
+        TRACE, DEBUG, INFO, WARN, ERROR
+    }
 }

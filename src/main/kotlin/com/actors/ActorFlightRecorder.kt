@@ -266,10 +266,17 @@ class ActorFlightRecorder(
         val lamport = "[L:%-4d]".format(event.lamportTimestamp)
         val time = event.timestamp.toString().take(23)
         return when (event) {
-            is TraceEvent.MessageReceived ->
-                "$lamport $time  MSG_RECV ${event.messageType} (mailbox=${event.mailboxSizeAfter})"
-            is TraceEvent.MessageSent ->
-                "$lamport $time  MSG_SENT → ${event.targetPath} ${event.messageType}"
+            is TraceEvent.MessageReceived -> {
+                val sender = event.senderPath?.let { " from=$it" } ?: ""
+                val trace = event.traceContext?.let { " trace=${it.traceId}/${it.spanId}" } ?: ""
+                val content = event.messageContent?.let { " content=$it" } ?: ""
+                "$lamport $time  MSG_RECV ${event.messageType}$sender$trace$content"
+            }
+            is TraceEvent.MessageSent -> {
+                val trace = event.traceContext?.let { " trace=${it.traceId}/${it.spanId}" } ?: ""
+                val content = event.messageContent?.let { " content=$it" } ?: ""
+                "$lamport $time  MSG_SENT → ${event.targetPath} ${event.messageType}$trace$content"
+            }
             is TraceEvent.SignalDelivered ->
                 "$lamport $time  SIGNAL ${event.signalType}${if (event.detail.isNotEmpty()) " (${event.detail})" else ""}"
             is TraceEvent.StateChanged ->
@@ -286,16 +293,29 @@ class ActorFlightRecorder(
                 "$lamport $time  FAILURE ${event.errorType}: ${event.errorMessage} → ${event.directive} (restart #${event.restartCount})"
             is TraceEvent.SlowMessageWarning ->
                 "$lamport $time  ⚠ SLOW ${event.messageType} ${event.durationMs}ms (threshold=${event.thresholdMs}ms)"
+            is TraceEvent.CustomEvent -> {
+                val lvl = event.level.name.padEnd(5)
+                val trace = event.traceContext?.let { " trace=${it.traceId}/${it.spanId}" } ?: ""
+                val extra = if (event.extra.isNotEmpty()) " ${event.extra}" else ""
+                "$lamport $time  [$lvl] ${event.message}$trace$extra"
+            }
         }
     }
 
     private fun eventToJson(event: TraceEvent): String {
         val base = """{"actor":"${event.actorPath}","time":"${event.timestamp}","lamport":${event.lamportTimestamp}"""
         return when (event) {
-            is TraceEvent.MessageReceived ->
-                """$base,"type":"msg_received","messageType":"${event.messageType}","mailboxSize":${event.mailboxSizeAfter}}"""
-            is TraceEvent.MessageSent ->
-                """$base,"type":"msg_sent","target":"${event.targetPath}","messageType":"${event.messageType}"}"""
+            is TraceEvent.MessageReceived -> {
+                val sender = event.senderPath?.let { ""","sender":"$it"""" } ?: ""
+                val trace = event.traceContext?.let { ""","traceId":"${it.traceId}","spanId":"${it.spanId}","parentSpanId":"${it.parentSpanId}"""" } ?: ""
+                val content = event.messageContent?.let { ""","content":"${escapeJson(it)}"""" } ?: ""
+                """$base,"type":"msg_received","messageType":"${event.messageType}","mailboxSize":${event.mailboxSizeAfter}$sender$trace$content}"""
+            }
+            is TraceEvent.MessageSent -> {
+                val trace = event.traceContext?.let { ""","traceId":"${it.traceId}","spanId":"${it.spanId}","parentSpanId":"${it.parentSpanId}"""" } ?: ""
+                val content = event.messageContent?.let { ""","content":"${escapeJson(it)}"""" } ?: ""
+                """$base,"type":"msg_sent","target":"${event.targetPath}","messageType":"${event.messageType}"$trace$content}"""
+            }
             is TraceEvent.SignalDelivered ->
                 """$base,"type":"signal_delivered","signal":"${event.signalType}","detail":"${event.detail}"}"""
             is TraceEvent.StateChanged ->
@@ -309,10 +329,56 @@ class ActorFlightRecorder(
             is TraceEvent.WatchRegistered ->
                 """$base,"type":"watch_registered","watched":"${event.watchedPath}"}"""
             is TraceEvent.FailureHandled ->
-                """$base,"type":"failure_handled","error":"${event.errorType}","message":"${event.errorMessage}","directive":"${event.directive}","restarts":${event.restartCount}}"""
+                """$base,"type":"failure_handled","error":"${event.errorType}","message":"${escapeJson(event.errorMessage)}","directive":"${event.directive}","restarts":${event.restartCount}}"""
             is TraceEvent.SlowMessageWarning ->
                 """$base,"type":"slow_message","messageType":"${event.messageType}","durationMs":${event.durationMs},"thresholdMs":${event.thresholdMs}}"""
+            is TraceEvent.CustomEvent -> {
+                val trace = event.traceContext?.let { ""","traceId":"${it.traceId}","spanId":"${it.spanId}"""" } ?: ""
+                val extra = if (event.extra.isNotEmpty()) {
+                    val pairs = event.extra.entries.joinToString(",") { """"${it.key}":"${escapeJson(it.value)}"""" }
+                    ""","extra":{$pairs}"""
+                } else ""
+                """$base,"type":"custom","level":"${event.level}","message":"${escapeJson(event.message)}"$trace$extra}"""
+            }
         }
+    }
+
+    /**
+     * Escape a string for safe JSON embedding.
+     * Handles quotes, backslashes, and newlines.
+     */
+    private fun escapeJson(s: String): String =
+        s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r")
+
+    // ─── NDJSON Export (Replayability) ─────────────────────────────
+
+    /**
+     * Export the trace buffer as NDJSON (Newline-Delimited JSON).
+     * Each event is one JSON object per line — the standard format
+     * for log streaming, import into analysis tools, and replay.
+     *
+     * NDJSON can be:
+     *   - Written to a file for post-mortem analysis
+     *   - Piped to jq for filtering: `cat trace.ndjson | jq 'select(.type=="msg_received")'`
+     *   - Loaded by [TraceReplay] for causal graph reconstruction
+     *   - Fed into Elasticsearch / Kibana / Grafana Loki
+     *
+     * @return One JSON object per line, no trailing newline
+     */
+    fun exportNdjson(): String = lock.read {
+        events.joinToString("\n") { eventToJson(it) }
+    }
+
+    /**
+     * Export the trace buffer to a [java.io.Writer].
+     * More memory-efficient than [exportNdjson] for large buffers.
+     */
+    fun exportNdjson(writer: java.io.Writer) = lock.read {
+        events.forEachIndexed { index, event ->
+            writer.write(eventToJson(event))
+            if (index < events.size - 1) writer.write("\n")
+        }
+        writer.flush()
     }
 
     // ─── Invariant Checks (TLA+ → Kotlin bridge) ────────────────
@@ -348,11 +414,13 @@ class ActorFlightRecorder(
     fun checkTraceLengthConsistency(): Boolean = lock.read { events.size <= capacity }
 
     /**
-     * INV-6: LamportClockMonotonic — Lamport clock equals total event count.
+     * INV-6: LamportClockMonotonic — Lamport clock is always ≥ total event count.
+     * In single-actor mode, they are equal. With cross-actor sends,
+     * the clock may jump ahead due to max(local, remote) + 1.
      * Corresponds to TLA+ invariant: LamportClockMonotonic
      */
     @TlaInvariant("LamportClockMonotonic")
-    fun checkLamportClockMonotonic(): Boolean = lamportClock.get() == totalEventCount.get()
+    fun checkLamportClockMonotonic(): Boolean = lamportClock.get() >= totalEventCount.get()
 
     /**
      * Verify all flight recorder invariants.
@@ -372,7 +440,7 @@ class ActorFlightRecorder(
             "Invariant violated: TraceLengthConsistency — buffer size ${events.size} > capacity $capacity"
         }
         check(checkLamportClockMonotonic()) {
-            "Invariant violated: LamportClockMonotonic — lamportClock=${lamportClock.get()} != totalEventCount=${totalEventCount.get()}"
+            "Invariant violated: LamportClockMonotonic — lamportClock=${lamportClock.get()} < totalEventCount=${totalEventCount.get()}"
         }
     }
 

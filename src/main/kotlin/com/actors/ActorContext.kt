@@ -171,5 +171,113 @@ class ActorContext<M : Any> internal constructor(
     val flightRecorder: ActorFlightRecorder
         get() = cell.flightRecorder
 
+    /**
+     * The current trace context for this actor.
+     * Updated on each message receipt — reflects the trace of the currently
+     * processing message. Use this to correlate application-level operations
+     * with the actor's trace.
+     *
+     * Returns [TraceContext.EMPTY] if no trace is active (e.g., during startup).
+     */
+    val currentTraceContext: TraceContext
+        get() = cell.currentTraceContext
+
+    // ─── Structured Trace Logging ────────────────────────────────
+    //
+    // These methods simultaneously:
+    //   1. Log to SLF4J at the appropriate level (for log aggregation)
+    //   2. Record a CustomEvent in the flight recorder (for replay/analysis)
+    //
+    // This gives you a UNIFIED timeline: system events (messages, signals,
+    // state changes) AND your application-level logs in one place.
+    //
+    // Example:
+    //   ctx.info("Processing order", "orderId" to "12345", "amount" to "99.99")
+    //   → SLF4J: actor.system/orders - Processing order
+    //   → FlightRecorder: CustomEvent(INFO, "Processing order", {orderId=12345, amount=99.99})
+    //
+
+    /**
+     * Log at TRACE level and record in the flight recorder.
+     * Use for fine-grained debugging that you'd normally disable in production.
+     *
+     * @param message The log message
+     * @param extra Optional key-value pairs for structured data
+     */
+    fun trace(message: String, vararg extra: Pair<String, String>) {
+        log.trace(message)
+        recordCustomEvent(TraceEvent.LogLevel.TRACE, message, extra.toMap())
+    }
+
+    /**
+     * Log at DEBUG level and record in the flight recorder.
+     * Use for developer-oriented information during development.
+     *
+     * @param message The log message
+     * @param extra Optional key-value pairs for structured data
+     */
+    fun debug(message: String, vararg extra: Pair<String, String>) {
+        log.debug(message)
+        recordCustomEvent(TraceEvent.LogLevel.DEBUG, message, extra.toMap())
+    }
+
+    /**
+     * Log at INFO level and record in the flight recorder.
+     * Use for notable business events (order placed, user logged in).
+     *
+     * @param message The log message
+     * @param extra Optional key-value pairs for structured data
+     */
+    fun info(message: String, vararg extra: Pair<String, String>) {
+        log.info(message)
+        recordCustomEvent(TraceEvent.LogLevel.INFO, message, extra.toMap())
+    }
+
+    /**
+     * Log at WARN level and record in the flight recorder.
+     * Use for potential issues that don't prevent operation.
+     *
+     * @param message The log message
+     * @param extra Optional key-value pairs for structured data
+     */
+    fun warn(message: String, vararg extra: Pair<String, String>) {
+        log.warn(message)
+        recordCustomEvent(TraceEvent.LogLevel.WARN, message, extra.toMap())
+    }
+
+    /**
+     * Log at ERROR level and record in the flight recorder.
+     * Use for errors that need attention but don't crash the actor.
+     *
+     * @param message The log message
+     * @param extra Optional key-value pairs for structured data
+     */
+    fun error(message: String, vararg extra: Pair<String, String>) {
+        log.error(message)
+        recordCustomEvent(TraceEvent.LogLevel.ERROR, message, extra.toMap())
+    }
+
+    /**
+     * Record a custom event with structured data in the flight recorder
+     * without logging to SLF4J. Use when you want replay data but not log noise.
+     *
+     * @param data Key-value pairs of structured data
+     */
+    fun record(vararg data: Pair<String, String>) {
+        recordCustomEvent(TraceEvent.LogLevel.INFO, "", data.toMap())
+    }
+
+    private fun recordCustomEvent(level: TraceEvent.LogLevel, message: String, extra: Map<String, String>) {
+        cell.flightRecorder.record(TraceEvent.CustomEvent(
+            actorPath = name,
+            timestamp = java.time.Instant.now(),
+            lamportTimestamp = cell.flightRecorder.nextLamportTimestamp(),
+            level = level,
+            message = message,
+            traceContext = cell.currentTraceContext.takeIf { it.isActive },
+            extra = extra
+        ))
+    }
+
     override fun toString(): String = "ActorContext($name)"
 }
