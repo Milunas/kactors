@@ -108,19 +108,20 @@ inline fun <M : Any> lifecycleBehavior(
     crossinline onStop: suspend () -> Unit = {},
     crossinline handler: suspend (M) -> Behavior<M>
 ): Behavior<M> {
-    return setup { _ ->
-        onStart()
-        behavior<M> { msg -> handler(msg) }
-            .onSignal { _, signal ->
-                when (signal) {
-                    is Signal.PostStop -> {
-                        onStop()
-                        Behavior.same()
-                    }
-                    else -> Behavior.same()
+    return behavior<M> { msg -> handler(msg) }
+        .onSignal { _, signal ->
+            when (signal) {
+                is Signal.PreStart -> {
+                    onStart()
+                    Behavior.same()
                 }
+                is Signal.PostStop -> {
+                    onStop()
+                    Behavior.same()
+                }
+                else -> Behavior.same()
             }
-    }
+        }
 }
 
 /**

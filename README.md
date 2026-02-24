@@ -2,7 +2,7 @@
 
 **Typed · Fault-Tolerant · Traceable · Built on Kotlin Coroutines**
 
-A production-grade Actor Model library for the JVM. Define actors as pure functions, get supervision trees, backpressure, and full tracing for free. Every component is formally verified with TLA+ and tested with JetBrains Lincheck.
+A formally specified Actor Model library for the JVM, built as part of a PhD research project on formal verification of concurrent systems. Define actors as pure functions, get supervision trees, backpressure, and full tracing for free. Every component is specified in TLA+, verified with TLC model checking, and tested with JetBrains Lincheck.
 
 ```kotlin
 // Define messages
@@ -37,17 +37,52 @@ val n: Int = ref.ask { Greeter.GetCount(it) }        // request-reply
 
 ## Table of Contents
 
-1. [Installation](#installation)
-2. [Core Concepts](#core-concepts)
-3. [API Reference](#api-reference)
-4. [Patterns & Recipes](#patterns--recipes)
-5. [Configuration](#configuration)
-6. [Tracing & Debugging](#tracing--debugging)
-7. [Fault Tolerance](#fault-tolerance)
-8. [Formal Verification](#formal-verification)
-9. [Test Suite](#test-suite)
-10. [Architecture](#architecture)
-11. [Comparison with Akka & Erlang](#comparison-with-akka--erlang)
+1. [Project Purpose](#project-purpose)
+2. [Installation](#installation)
+3. [Core Concepts](#core-concepts)
+4. [API Reference](#api-reference)
+5. [Patterns & Recipes](#patterns--recipes)
+6. [Configuration](#configuration)
+7. [Tracing & Debugging](#tracing--debugging)
+8. [Fault Tolerance](#fault-tolerance)
+9. [Formal Verification](#formal-verification)
+10. [tla2lincheck — Auto-Generated Lincheck Tests](#tla2lincheck--auto-generated-lincheck-tests)
+11. [Test Suite](#test-suite)
+12. [Architecture](#architecture)
+13. [Repository Layout](#repository-layout)
+14. [Comparison with Akka & Erlang](#comparison-with-akka--erlang)
+15. [Contributing](#contributing)
+
+---
+
+## Project Purpose
+
+This library is part of a **PhD research project** exploring three interconnected topics:
+
+1. **Formal verification of concurrent systems** — using TLA+ specifications and TLC model checking to prove safety properties of actor-based systems
+2. **Traceability between specifications and implementations** — a machine-readable annotation system (`@TlaSpec`, `@TlaAction`, `@TlaVariable`, `@TlaInvariant`) that links every Kotlin class, method, and field to its TLA+ counterpart
+3. **Actor model semantics for fault-tolerant systems** — demonstrating that backpressure, supervision, and lifecycle management can be formally specified and verified
+
+### Goals
+
+| Goal | What it means |
+|------|---------------|
+| **Fault tolerant** | Better backpressure and supervision than Akka Typed or Erlang/OTP on the JVM |
+| **Traceable & debuggable** | Every message, signal, and lifecycle event is observable and linked to a TLA+ spec |
+| **Academic / PhD-grade** | Every design decision is provable at the TLA+ level and publishable |
+
+### What This Is — and Isn't
+
+This is a **library**, not an application framework. It provides actor primitives that applications build on top of. Application-level concerns (Kafka consumers, HTTP handlers, database actors) belong in your code, not in this library.
+
+### Inspiration
+
+```
+Erlang/OTP  ──▶  Process links, monitors, let-it-crash, supervision trees
+Akka Typed  ──▶  Typed behaviors, ActorContext as parameter, signal handling
+This Library ──▶  TLA+-verified, better backpressure, suspendable behaviors,
+                  machine-readable annotations, modular specs
+```
 
 ---
 
@@ -696,6 +731,137 @@ TLA+ invariants are embedded in Lincheck tests as `@Operation` postconditions, s
 
 ---
 
+## tla2lincheck — Auto-Generated Lincheck Tests
+
+The project uses **tla2lincheck**, a custom Gradle plugin that parses TLA+ specifications and auto-generates JetBrains Lincheck test classes with embedded TLA+ invariants. This bridges the gap between formal specification and runtime verification.
+
+### How It Works
+
+```
+┌──────────────┐     ┌──────────────────┐     ┌────────────────────┐     ┌──────────────┐
+│  TLA+ Spec   │     │  tla2lincheck    │     │  Generated Kotlin  │     │  Lincheck    │
+│  (.tla file) │────▶│  Parser +        │────▶│  Test Class        │────▶│  Model Check │
+│              │     │  Code Generator  │     │  (invariants       │     │  + Stress    │
+└──────────────┘     └──────────────────┘     │   embedded)        │     └──────────────┘
+                                              └────────────────────┘
+```
+
+For each `.tla` file, tla2lincheck:
+1. Parses `CONSTANTS`, `VARIABLES`, and `INVARIANTS`
+2. Extracts each TLA+ action as a Lincheck `@Operation`
+3. Embeds all invariant checks inside every `@Operation` as postconditions
+4. Generates both `ModelCheckingOptions` and `StressOptions` tests
+
+### Configuration
+
+The plugin is configured in `build.gradle.kts`:
+
+```kotlin
+plugins {
+    id("io.github.tla2lincheck") version "0.1.0-SNAPSHOT"
+}
+
+tla2lincheck {
+    tlaSourceDir.set(file("src/main/tla"))           // where to find .tla files
+    outputDir.set(file("src/test/tla2lincheck"))      // where to write generated tests
+    packageName.set("com.actors.generated")           // package for generated classes
+    threads.set(3)                                    // Lincheck threads
+    actorsPerThread.set(2)                            // operations per thread
+    iterations.set(50)                                // model checking iterations
+    embedInvariants.set(true)                         // embed TLA+ invariants in @Operations
+}
+```
+
+The plugin source lives in a sibling directory (`../tla2lincheck`) and is included as a composite build via `settings.gradle.kts`:
+
+```kotlin
+pluginManagement {
+    includeBuild("../tla2lincheck")
+}
+```
+
+### Running the Generator
+
+```bash
+# Generate Lincheck tests from all TLA+ specs
+./gradlew generateLincheckTests
+
+# Generate + run all tests
+./gradlew generateLincheckTests test
+```
+
+Generated files are written to `src/test/tla2lincheck/com/actors/generated/`:
+
+```
+src/test/tla2lincheck/com/actors/generated/
+├── ActorMailboxLincheckTest.kt       ← from ActorMailbox.tla
+├── ActorLifecycleLincheckTest.kt     ← from ActorLifecycle.tla
+├── RequestReplyLincheckTest.kt       ← from RequestReply.tla
+├── ActorHierarchyLincheckTest.kt     ← from ActorHierarchy.tla
+├── DeathWatchLincheckTest.kt         ← from DeathWatch.tla
+└── ActorTraceLincheckTest.kt         ← from ActorTrace.tla
+```
+
+### What a Generated Test Looks Like
+
+Each generated test class:
+- Declares state fields from TLA+ `VARIABLES`
+- Maps each TLA+ action to a Lincheck `@Operation`
+- Calls `checkAllInvariants()` inside every operation
+- Runs both model checking (exhaustive interleaving exploration) and stress testing
+
+```kotlin
+// AUTO-GENERATED from ActorMailbox.tla
+class ActorMailboxLincheckTest {
+    // State from TLA+ VARIABLES
+    private val mailbox: MutableList<Any> = mutableListOf()
+    private var recvCount: Any = 0
+    private val sendCount: MutableMap<Int, Int> = mutableMapOf()
+
+    @Operation
+    fun send(@Param(name = "s") s: Int, @Param(name = "msg") msg: Int): String {
+        // ... TLA+ action logic ...
+        checkAllInvariants()  // ← embedded from TLA+ INVARIANTS
+        return "ok"
+    }
+
+    @Test
+    fun modelCheckingTest() = ModelCheckingOptions()
+        .iterations(50)
+        .threads(3)
+        .actorsPerThread(2)
+        .check(this::class)
+
+    @Test
+    fun stressTest() = StressOptions()
+        .iterations(50)
+        .threads(3)
+        .actorsPerThread(2)
+        .check(this::class)
+}
+```
+
+### Hand-Written vs Generated Tests
+
+The project has **both**:
+
+| Type | Location | Purpose |
+|------|----------|--------|
+| Hand-written | `src/test/kotlin/com/actors/` | Test the real Kotlin implementation (ActorCell, Mailbox, etc.) |
+| Auto-generated | `src/test/tla2lincheck/` | Test the TLA+ specification's abstract state machine directly |
+
+Hand-written tests verify that the Kotlin code behaves correctly. Generated tests verify that the TLA+ spec itself is logically consistent under concurrent interleavings. Together, they close the verification loop:
+
+```
+TLA+ spec  ──TLC──▶  spec is correct (state space exhaustion)
+                     │
+                     ├──tla2lincheck──▶  spec is linearizable (Lincheck)
+                     │
+Kotlin code ──hand-written tests──▶  implementation matches spec
+```
+
+---
+
 ## Test Suite
 
 | Test Class | Strategy | What it verifies |
@@ -764,6 +930,51 @@ TLA+ invariants are embedded in Lincheck tests as `@Operation` postconditions, s
 
 ---
 
+## Repository Layout
+
+```
+actors/
+├── src/
+│   ├── main/
+│   │   ├── kotlin/com/actors/        ← Core library source
+│   │   │   ├── ActorCell.kt          ← Runtime: lifecycle, loop, hierarchy, deathwatch
+│   │   │   ├── ActorConfig.kt        ← User-facing configuration bundle
+│   │   │   ├── ActorContext.kt       ← Actor's API: spawn, watch, stop, log
+│   │   │   ├── ActorFlightRecorder.kt← Per-actor trace buffer (ring buffer)
+│   │   │   ├── ActorRef.kt           ← Message handle: tell, ask
+│   │   │   ├── ActorState.kt         ← State enum: CREATED→STARTING→RUNNING→STOPPING→STOPPED
+│   │   │   ├── ActorSystem.kt        ← Root container and spawn entry point
+│   │   │   ├── ActorTreeDumper.kt    ← Supervision tree visualization
+│   │   │   ├── Behavior.kt           ← Behavior<M> fun interface + combinators
+│   │   │   ├── Dsl.kt                ← receive{}, setup{}, behavior{}, lifecycleBehavior{}
+│   │   │   ├── Mailbox.kt            ← Bounded Channel wrapper
+│   │   │   ├── MessageEnvelope.kt    ← Internal trace metadata per message
+│   │   │   ├── Messages.kt           ← Common protocols: Request<R>
+│   │   │   ├── Signal.kt             ← PreStart, PostStop, Terminated, ChildFailed
+│   │   │   ├── SupervisorStrategy.kt ← STOP/RESTART/RESUME/ESCALATE
+│   │   │   ├── TlaAnnotations.kt     ← @TlaSpec @TlaAction @TlaVariable @TlaInvariant
+│   │   │   ├── TraceContext.kt       ← Distributed trace correlation (traceId/spanId)
+│   │   │   ├── TraceEvent.kt         ← All observable event types
+│   │   │   └── TraceReplay.kt        ← NDJSON import + post-mortem analysis
+│   │   └── tla/                      ← TLA+ specifications
+│   │       ├── ActorMailbox.tla/.cfg
+│   │       ├── ActorLifecycle.tla/.cfg
+│   │       ├── RequestReply.tla/.cfg
+│   │       ├── ActorHierarchy.tla/.cfg
+│   │       ├── DeathWatch.tla/.cfg
+│   │       ├── ActorTrace.tla/.cfg
+│   │       └── tla2tools.jar         ← Standalone TLC model checker
+│   └── test/
+│       ├── kotlin/com/actors/        ← Hand-written tests
+│       └── tla2lincheck/             ← Auto-generated Lincheck tests
+├── build.gradle.kts
+├── settings.gradle.kts
+├── README.md                         ← This file
+└── AGENTS.md                         ← LLM agent instructions
+```
+
+---
+
 ## Comparison with Akka & Erlang
 
 | Feature | Erlang/OTP | Akka Typed | This Library |
@@ -791,3 +1002,125 @@ TLA+ invariants are embedded in Lincheck tests as `@Operation` postconditions, s
 | AssertJ | 3.26.3 | Assertions |
 | jqwik | 1.9.2 | Property-based testing |
 | tla2lincheck | 0.1.0-SNAPSHOT | TLA+ → Lincheck test generation |
+
+---
+
+## Contributing
+
+### Getting Started
+
+```bash
+# Clone the repository (and the tla2lincheck sibling)
+git clone <repo-url> actors
+git clone <repo-url> tla2lincheck   # must be in ../tla2lincheck relative to actors/
+
+cd actors
+
+# Build and test
+./gradlew test
+
+# Run TLC on all TLA+ specs
+alias tlc="java -cp src/main/tla/tla2tools.jar tlc2.TLC"
+for spec in ActorMailbox ActorLifecycle RequestReply ActorHierarchy DeathWatch ActorTrace; do
+    echo "=== $spec ==="
+    tlc src/main/tla/${spec}.tla -config src/main/tla/${spec}.cfg -workers auto
+done
+
+# Generate Lincheck tests from TLA+ specs
+./gradlew generateLincheckTests
+```
+
+### Adding a New Feature (Checklist)
+
+The project follows a strict **spec-first** workflow. New concurrent/lifecycle/messaging features must follow this order:
+
+#### Step 1 — TLA+ Spec
+
+- [ ] Identify which existing spec covers this, OR create a new `.tla` file
+- [ ] Write `CONSTANTS`, `VARIABLES`, `TypeOK`, `Init`, actions, and safety invariants
+- [ ] Each action must have a `\* Maps to: ClassName.methodName()` comment
+- [ ] Each variable must have a `\* SUBSET Actors — ClassName.fieldName` comment
+- [ ] Create `.cfg` with `SPECIFICATION Spec`, `CONSTANTS`, `INVARIANTS`
+- [ ] Run TLC — **must complete with zero errors**
+
+#### Step 2 — Kotlin Implementation
+
+- [ ] Annotate the class with `@TlaSpec("ModuleName")`
+- [ ] Annotate fields with `@TlaVariable("variableName")`
+- [ ] Annotate methods with `@TlaAction("ActionName")`
+- [ ] Write `@TlaInvariant("Name") fun checkXxx(): Boolean` for each invariant
+- [ ] Add all invariant checks to `checkAllInvariants()`
+- [ ] Use bounded channels (never unbounded on the message path)
+- [ ] Include error messages with actor name: `check(...) { "... actor '$name' ..." }`
+
+#### Step 3 — Tests
+
+- [ ] JUnit 5 unit tests with `checkAllInvariants()` at the end of each test
+- [ ] Concurrent stress test with `@RepeatedTest` and `CyclicBarrier`
+- [ ] Lincheck test if the feature involves linearizable operations
+- [ ] Re-generate tla2lincheck tests: `./gradlew generateLincheckTests`
+
+#### Step 4 — Verify
+
+- [ ] All 6+ TLA+ specs pass TLC with zero errors
+- [ ] All existing tests still pass
+- [ ] No compiler errors
+
+### Code Conventions
+
+| Rule | Detail |
+|------|--------|
+| **Behaviors are immutable** | State is encoded as function parameters, not `var` fields |
+| **Messages are sealed** | `sealed class` or `sealed interface` with `data class` / `data object` variants |
+| **No shared mutable state** | Actors communicate only via messages |
+| **No `runBlocking` in production** | Only in tests |
+| **No `GlobalScope`** | Exception: transient reply-ref actors (documented with `@OptIn`) |
+| **Rethrow `CancellationException`** | `catch (e: CancellationException) { throw e }` |
+| **ActorContext is request-scoped** | Never store it, pass it outside the behavior, or use from another coroutine |
+| **Every `check()`/`require()` includes actor name** | `check(cond) { "... actor '$name' ..." }` |
+
+### Forbidden Patterns
+
+```kotlin
+// ✗ Unbounded queue in hot path
+val mailbox = Channel<M>(UNLIMITED)
+
+// ✗ Shared mutable state
+class MyActor { var counter = 0 }
+
+// ✗ Mutable var in behavior closure
+val b = behavior<Msg> { var state = 0; state++; Behavior.same() }
+
+// ✗ Blocking in coroutine
+Thread.sleep(1000)  // use delay()
+
+// ✗ Touching another actor's internals
+otherActor.cell.children  // use message passing
+```
+
+### Running Verification
+
+```bash
+# TLC model checking (all specs, must say "No error has been found")
+for spec in ActorMailbox ActorLifecycle RequestReply ActorHierarchy DeathWatch ActorTrace; do
+    tlc src/main/tla/${spec}.tla -config src/main/tla/${spec}.cfg -workers auto
+done
+
+# Kotlin tests + Lincheck
+./gradlew test
+
+# Check TLA+ annotation coverage (should never decrease)
+grep -r "@TlaSpec\|@TlaAction\|@TlaVariable\|@TlaInvariant" \
+     src/main/kotlin/com/actors/ | wc -l
+```
+
+### Commit Message Convention
+
+Use descriptive messages that reference the spec when applicable:
+
+```
+feat(mailbox): add backpressure metrics [ActorMailbox.tla]
+fix(lifecycle): CAS race in startInline [ActorLifecycle.tla]
+test(deathwatch): add concurrent unwatch stress test
+docs: update README with tla2lincheck guide
+```
