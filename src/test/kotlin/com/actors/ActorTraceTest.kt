@@ -26,6 +26,41 @@ import kotlin.time.Duration.Companion.milliseconds
  */
 class ActorTraceTest {
 
+    // Message types for tests (sealed classes cannot be local in Kotlin)
+
+    sealed class Msg {
+        data object Ping : Msg()
+    }
+
+    sealed class ParentMsg {
+        data object SpawnChild : ParentMsg()
+    }
+
+    sealed class WatcherMsg {
+        data class WatchThis(val ref: ActorRef<String>) : WatcherMsg()
+    }
+
+    sealed class FailMsg {
+        data object Fail : FailMsg()
+        data object Ok : FailMsg()
+    }
+
+    sealed class CountMsg {
+        data object Increment : CountMsg()
+    }
+
+    sealed class SlowMsg {
+        data object Slow : SlowMsg()
+    }
+
+    sealed class TraceMsg {
+        data object Ping : TraceMsg()
+    }
+
+    sealed class ContextMsg {
+        data class GetTraceSize(override val replyTo: ActorRef<Int>) : ContextMsg(), Request<Int>
+    }
+
     private lateinit var system: ActorSystem
 
     @BeforeEach
@@ -213,10 +248,6 @@ class ActorTraceTest {
 
     @Test
     fun `actor records lifecycle state changes in flight recorder`() = runBlocking {
-        sealed class Msg {
-            data object Ping : Msg()
-        }
-
         val ref = system.spawn("lifecycle-actor", receive<Msg> { _, _ -> Behavior.same() })
 
         delay(100.milliseconds) // Let actor start
@@ -244,10 +275,6 @@ class ActorTraceTest {
 
     @Test
     fun `actor records child spawn in flight recorder`() = runBlocking {
-        sealed class ParentMsg {
-            data object SpawnChild : ParentMsg()
-        }
-
         val parentRef = system.spawn("parent", receive<ParentMsg> { ctx, msg ->
             when (msg) {
                 is ParentMsg.SpawnChild -> {
@@ -271,10 +298,6 @@ class ActorTraceTest {
 
     @Test
     fun `actor records signal delivery including Terminated`() = runBlocking {
-        sealed class WatcherMsg {
-            data class WatchThis(val ref: ActorRef<String>) : WatcherMsg()
-        }
-
         val watchedRef = system.spawn("watched", statelessBehavior<String> { })
 
         val watcherRef = system.spawn("watcher", receive<WatcherMsg> { ctx, msg ->
@@ -312,11 +335,6 @@ class ActorTraceTest {
 
     @Test
     fun `actor records failure handling in flight recorder`() = runBlocking {
-        sealed class FailMsg {
-            data object Fail : FailMsg()
-            data object Ok : FailMsg()
-        }
-
         val ref = system.spawn("failing-actor", receive<FailMsg> { _, msg ->
             when (msg) {
                 is FailMsg.Fail -> throw RuntimeException("test failure")
@@ -344,10 +362,6 @@ class ActorTraceTest {
 
     @Test
     fun `actor records behavior change in flight recorder`() = runBlocking {
-        sealed class CountMsg {
-            data object Increment : CountMsg()
-        }
-
         fun counter(count: Int): Behavior<CountMsg> = receive { _, msg ->
             when (msg) {
                 is CountMsg.Increment -> counter(count + 1) // Returns new behavior
@@ -372,10 +386,6 @@ class ActorTraceTest {
 
     @Test
     fun `slow message detection records warning in flight recorder`() = runBlocking {
-        sealed class SlowMsg {
-            data object Slow : SlowMsg()
-        }
-
         // Create actor cell with very low threshold for testing
         val ref = system.spawn("slow-actor", receive<SlowMsg> { _, msg ->
             when (msg) {
@@ -429,10 +439,6 @@ class ActorTraceTest {
 
     @Test
     fun `system dumpAllTraces includes all actor traces`() = runBlocking {
-        sealed class TraceMsg {
-            data object Ping : TraceMsg()
-        }
-
         val ref = system.spawn("traced-actor", statelessBehavior<TraceMsg> { })
         delay(100.milliseconds)
         ref.tell(TraceMsg.Ping)
@@ -461,10 +467,6 @@ class ActorTraceTest {
 
     @Test
     fun `actor can access its own flight recorder via context`() = runBlocking {
-        sealed class ContextMsg {
-            data class GetTraceSize(val replyTo: ActorRef<Int>) : ContextMsg(), Request<Int>
-        }
-
         val ref = system.spawn("ctx-trace-actor", receive<ContextMsg> { ctx, msg ->
             when (msg) {
                 is ContextMsg.GetTraceSize -> {

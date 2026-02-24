@@ -29,6 +29,72 @@ import kotlin.time.Duration.Companion.seconds
  */
 class TraceabilityTest {
 
+    // Message types for tests (sealed classes cannot be local in Kotlin)
+
+    sealed class SenderPathForwardMsg {
+        data class Forward(val target: ActorRef<SenderPathReceiverMsg>) : SenderPathForwardMsg()
+    }
+    sealed class SenderPathReceiverMsg {
+        data object Hello : SenderPathReceiverMsg()
+    }
+
+    sealed class MsgSentForwardMsg {
+        data class Forward(val target: ActorRef<String>) : MsgSentForwardMsg()
+    }
+
+    sealed class LamportMsg {
+        data class Ping(val target: ActorRef<LamportMsg>) : LamportMsg()
+        data object Pong : LamportMsg()
+    }
+
+    sealed class InfoMsg {
+        data class Process(val orderId: String) : InfoMsg()
+    }
+
+    sealed class LogLevelMsg {
+        data object DoAll : LogLevelMsg()
+    }
+
+    sealed class RecordMsg {
+        data object Store : RecordMsg()
+    }
+
+    sealed class WorkerMsg {
+        data object Work : WorkerMsg()
+    }
+    sealed class DispatchForwardMsg {
+        data class Go(val target: ActorRef<WorkerMsg>) : DispatchForwardMsg()
+    }
+
+    sealed class NdjsonMsg {
+        data object Ping : NdjsonMsg()
+    }
+
+    sealed class CMsg {
+        data object Work : CMsg()
+    }
+    sealed class BMsg {
+        data class Forward(val cRef: ActorRef<CMsg>) : BMsg()
+    }
+    sealed class AMsg {
+        data class Start(val bRef: ActorRef<BMsg>, val cRef: ActorRef<CMsg>) : AMsg()
+    }
+
+    sealed class PongMsg {
+        data object Pong : PongMsg()
+    }
+    sealed class PingMsg {
+        data class Ping(val target: ActorRef<PongMsg>) : PingMsg()
+    }
+
+    sealed class OrderMsg {
+        data class Place(val orderId: String) : OrderMsg()
+    }
+
+    sealed class CheckTraceMsg {
+        data class CheckTrace(override val replyTo: ActorRef<String>) : CheckTraceMsg(), Request<String>
+    }
+
     private lateinit var system: ActorSystem
 
     @BeforeEach
@@ -87,26 +153,19 @@ class TraceabilityTest {
 
     @Test
     fun `tell from actor records sender path in receiver flight recorder`() = runBlocking {
-        sealed class ForwardMsg {
-            data class Forward(val target: ActorRef<ReceiverMsg>) : ForwardMsg()
-        }
-        sealed class ReceiverMsg {
-            data object Hello : ReceiverMsg()
-        }
+        val receiverRef = system.spawn("receiver", statelessBehavior<SenderPathReceiverMsg> { })
 
-        val receiverRef = system.spawn("receiver", statelessBehavior<ReceiverMsg> { })
-
-        val forwarderRef = system.spawn("forwarder", receive<ForwardMsg> { ctx, msg ->
+        val forwarderRef = system.spawn("forwarder", receive<SenderPathForwardMsg> { ctx, msg ->
             when (msg) {
-                is ForwardMsg.Forward -> {
-                    msg.target.tell(ReceiverMsg.Hello)
+                is SenderPathForwardMsg.Forward -> {
+                    msg.target.tell(SenderPathReceiverMsg.Hello)
                     Behavior.same()
                 }
             }
         })
 
         delay(100.milliseconds)
-        forwarderRef.tell(ForwardMsg.Forward(receiverRef))
+        forwarderRef.tell(SenderPathForwardMsg.Forward(receiverRef))
         delay(200.milliseconds)
 
         // The receiver's flight recorder should show the sender
@@ -124,15 +183,11 @@ class TraceabilityTest {
 
     @Test
     fun `tell from actor records MessageSent in sender flight recorder`() = runBlocking {
-        sealed class ForwardMsg {
-            data class Forward(val target: ActorRef<String>) : ForwardMsg()
-        }
-
         val targetRef = system.spawn("target", statelessBehavior<String> { })
 
-        val senderRef = system.spawn("sender", receive<ForwardMsg> { _, msg ->
+        val senderRef = system.spawn("sender", receive<MsgSentForwardMsg> { _, msg ->
             when (msg) {
-                is ForwardMsg.Forward -> {
+                is MsgSentForwardMsg.Forward -> {
                     msg.target.tell("hello")
                     Behavior.same()
                 }
@@ -140,7 +195,7 @@ class TraceabilityTest {
         })
 
         delay(100.milliseconds)
-        senderRef.tell(ForwardMsg.Forward(targetRef))
+        senderRef.tell(MsgSentForwardMsg.Forward(targetRef))
         delay(200.milliseconds)
 
         // Sender's flight recorder should have MessageSent event
@@ -160,20 +215,15 @@ class TraceabilityTest {
 
     @Test
     fun `Lamport clock syncs across actors on message delivery`() = runBlocking {
-        sealed class Msg {
-            data class Ping(val target: ActorRef<Msg>) : Msg()
-            data object Pong : Msg()
-        }
-
         // Actor A sends to B, then B sends back
         val latchB = CountDownLatch(1)
-        val actorB = system.spawn("b", receive<Msg> { ctx, msg ->
+        val actorB = system.spawn("b", receive<LamportMsg> { ctx, msg ->
             when (msg) {
-                is Msg.Ping -> {
-                    msg.target.tell(Msg.Pong)
+                is LamportMsg.Ping -> {
+                    msg.target.tell(LamportMsg.Pong)
                     Behavior.same()
                 }
-                is Msg.Pong -> {
+                is LamportMsg.Pong -> {
                     latchB.countDown()
                     Behavior.same()
                 }
@@ -181,13 +231,13 @@ class TraceabilityTest {
         })
 
         val latchA = CountDownLatch(1)
-        val actorA = system.spawn("a", receive<Msg> { ctx, msg ->
+        val actorA = system.spawn("a", receive<LamportMsg> { ctx, msg ->
             when (msg) {
-                is Msg.Ping -> {
-                    msg.target.tell(Msg.Pong)
+                is LamportMsg.Ping -> {
+                    msg.target.tell(LamportMsg.Pong)
                     Behavior.same()
                 }
-                is Msg.Pong -> {
+                is LamportMsg.Pong -> {
                     latchA.countDown()
                     Behavior.same()
                 }
@@ -196,7 +246,7 @@ class TraceabilityTest {
 
         delay(100.milliseconds)
         // A sends Ping to B, B receives and sends Pong back
-        actorA.tell(Msg.Ping(actorB))
+        actorA.tell(LamportMsg.Ping(actorB))
         latchA.await(2, TimeUnit.SECONDS)
 
         val clockA = actorA.actorCell.flightRecorder.currentLamportTime
@@ -238,13 +288,9 @@ class TraceabilityTest {
 
     @Test
     fun `ctx info records CustomEvent in flight recorder`() = runBlocking {
-        sealed class Msg {
-            data class Process(val orderId: String) : Msg()
-        }
-
-        val ref = system.spawn("order-actor", receive<Msg> { ctx, msg ->
+        val ref = system.spawn("order-actor", receive<InfoMsg> { ctx, msg ->
             when (msg) {
-                is Msg.Process -> {
+                is InfoMsg.Process -> {
                     ctx.info("Processing order", "orderId" to msg.orderId, "step" to "validation")
                     Behavior.same()
                 }
@@ -252,7 +298,7 @@ class TraceabilityTest {
         })
 
         delay(100.milliseconds)
-        ref.tell(Msg.Process("ORD-123"))
+        ref.tell(InfoMsg.Process("ORD-123"))
         delay(100.milliseconds)
 
         val events = ref.actorCell.flightRecorder.snapshot()
@@ -270,13 +316,9 @@ class TraceabilityTest {
 
     @Test
     fun `all log levels are recorded as CustomEvents`() = runBlocking {
-        sealed class Msg {
-            data object DoAll : Msg()
-        }
-
-        val ref = system.spawn("multi-level", receive<Msg> { ctx, msg ->
+        val ref = system.spawn("multi-level", receive<LogLevelMsg> { ctx, msg ->
             when (msg) {
-                is Msg.DoAll -> {
+                is LogLevelMsg.DoAll -> {
                     ctx.trace("trace msg")
                     ctx.debug("debug msg")
                     ctx.info("info msg")
@@ -288,7 +330,7 @@ class TraceabilityTest {
         })
 
         delay(100.milliseconds)
-        ref.tell(Msg.DoAll)
+        ref.tell(LogLevelMsg.DoAll)
         delay(100.milliseconds)
 
         val events = ref.actorCell.flightRecorder.snapshot()
@@ -311,13 +353,9 @@ class TraceabilityTest {
 
     @Test
     fun `ctx record stores event without SLF4J logging`() = runBlocking {
-        sealed class Msg {
-            data object Store : Msg()
-        }
-
-        val ref = system.spawn("silent-recorder", receive<Msg> { ctx, msg ->
+        val ref = system.spawn("silent-recorder", receive<RecordMsg> { ctx, msg ->
             when (msg) {
-                is Msg.Store -> {
+                is RecordMsg.Store -> {
                     ctx.record("key1" to "value1", "key2" to "value2")
                     Behavior.same()
                 }
@@ -325,7 +363,7 @@ class TraceabilityTest {
         })
 
         delay(100.milliseconds)
-        ref.tell(Msg.Store)
+        ref.tell(RecordMsg.Store)
         delay(100.milliseconds)
 
         val events = ref.actorCell.flightRecorder.snapshot()
@@ -342,13 +380,6 @@ class TraceabilityTest {
 
     @Test
     fun `custom events carry current trace context`() = runBlocking {
-        sealed class ForwardMsg {
-            data class Go(val target: ActorRef<WorkerMsg>) : ForwardMsg()
-        }
-        sealed class WorkerMsg {
-            data object Work : WorkerMsg()
-        }
-
         val latch = CountDownLatch(1)
         val workerRef = system.spawn("worker", receive<WorkerMsg> { ctx, msg ->
             when (msg) {
@@ -360,9 +391,9 @@ class TraceabilityTest {
             }
         })
 
-        val dispatcherRef = system.spawn("dispatcher", receive<ForwardMsg> { _, msg ->
+        val dispatcherRef = system.spawn("dispatcher", receive<DispatchForwardMsg> { _, msg ->
             when (msg) {
-                is ForwardMsg.Go -> {
+                is DispatchForwardMsg.Go -> {
                     msg.target.tell(WorkerMsg.Work)
                     Behavior.same()
                 }
@@ -370,7 +401,7 @@ class TraceabilityTest {
         })
 
         delay(100.milliseconds)
-        dispatcherRef.tell(ForwardMsg.Go(workerRef))
+        dispatcherRef.tell(DispatchForwardMsg.Go(workerRef))
         latch.await(2, TimeUnit.SECONDS)
         delay(50.milliseconds)
 
@@ -394,13 +425,9 @@ class TraceabilityTest {
 
     @Test
     fun `exportNdjson produces valid NDJSON loadable by TraceReplay`() = runBlocking {
-        sealed class Msg {
-            data object Ping : Msg()
-        }
-
-        val ref = system.spawn("ndjson-actor", statelessBehavior<Msg> { })
+        val ref = system.spawn("ndjson-actor", statelessBehavior<NdjsonMsg> { })
         delay(100.milliseconds)
-        ref.tell(Msg.Ping)
+        ref.tell(NdjsonMsg.Ping)
         delay(100.milliseconds)
 
         val ndjson = ref.actorCell.flightRecorder.exportNdjson()
@@ -658,16 +685,6 @@ class TraceabilityTest {
 
     @Test
     fun `trace context propagates through actor chain A to B to C`() = runBlocking {
-        sealed class CMsg {
-            data object Work : CMsg()
-        }
-        sealed class BMsg {
-            data class Forward(val cRef: ActorRef<CMsg>) : BMsg()
-        }
-        sealed class AMsg {
-            data class Start(val bRef: ActorRef<BMsg>, val cRef: ActorRef<CMsg>) : AMsg()
-        }
-
         val latch = CountDownLatch(1)
         val actorC = system.spawn("c", receive<CMsg> { ctx, msg ->
             when (msg) {
@@ -728,13 +745,6 @@ class TraceabilityTest {
 
     @Test
     fun `trace context links sender and receiver via same traceId`() = runBlocking {
-        sealed class PingMsg {
-            data class Ping(val target: ActorRef<PongMsg>) : PingMsg()
-        }
-        sealed class PongMsg {
-            data object Pong : PongMsg()
-        }
-
         val latch = CountDownLatch(1)
         val ponger = system.spawn("ponger", receive<PongMsg> { _, msg ->
             when (msg) {
@@ -781,10 +791,6 @@ class TraceabilityTest {
 
     @Test
     fun `full round-trip from live system to TraceReplay analysis`() = runBlocking {
-        sealed class OrderMsg {
-            data class Place(val orderId: String) : OrderMsg()
-        }
-
         val latch = CountDownLatch(1)
         val ref = system.spawn("orders", receive<OrderMsg> { ctx, msg ->
             when (msg) {
@@ -895,14 +901,10 @@ class TraceabilityTest {
 
     @Test
     fun `actor currentTraceContext is updated on message receipt`() = runBlocking {
-        sealed class Msg {
-            data class CheckTrace(val replyTo: ActorRef<String>) : Msg(), Request<String>
-        }
-
         // Have actor A send to actor B, then B reports its traceContext
-        val actorB = system.spawn("b", receive<Msg> { ctx, msg ->
+        val actorB = system.spawn("b", receive<CheckTraceMsg> { ctx, msg ->
             when (msg) {
-                is Msg.CheckTrace -> {
+                is CheckTraceMsg.CheckTrace -> {
                     msg.replyTo.tell(ctx.currentTraceContext.toString())
                     Behavior.same()
                 }
@@ -911,7 +913,7 @@ class TraceabilityTest {
 
         val actorA = system.spawn("a", receive<String> { _, _ ->
             // Send from A to B — B should get a trace context
-            val response: String = actorB.ask { replyTo -> Msg.CheckTrace(replyTo) }
+            val response: String = actorB.ask { replyTo -> CheckTraceMsg.CheckTrace(replyTo) }
             // We can verify response is a valid trace context representation
             Behavior.same()
         })

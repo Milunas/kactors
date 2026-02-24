@@ -199,7 +199,7 @@ class SignalTest {
             if (msg == "die") Behavior.stopped() else Behavior.same()
         }
 
-        val watcherBehavior = behavior<String> { _, _ ->
+        val watcherBehavior = receive<String> { _, _ ->
             Behavior.same()
         }.onSignal { _, signal ->
             when (signal) {
@@ -234,7 +234,7 @@ class SignalTest {
             if (msg == "die") Behavior.stopped() else Behavior.same()
         }
 
-        val watcherBehavior = behavior<String> { _, _ ->
+        val watcherBehavior = receive<String> { _, _ ->
             Behavior.same()
         }.onSignal { _, signal ->
             when (signal) {
@@ -266,7 +266,7 @@ class SignalTest {
 
     sealed class WatcherMsg {
         data class Watch(val ref: ActorRef<*>) : WatcherMsg()
-        data class GetTerminated(val replyTo: ActorRef<List<String>>) : WatcherMsg(), Request<List<String>>
+        data class GetTerminated(override val replyTo: ActorRef<List<String>>) : WatcherMsg(), Request<List<String>>
     }
 
     @Test
@@ -324,7 +324,7 @@ class SignalTest {
                 if (msg == "crash") throw RuntimeException("Child explosion!")
             }, supervisorStrategy = SupervisorStrategy.stop())
 
-            behavior<String> { _, _ -> Behavior.same() }
+            receive<String> { _, _ -> Behavior.same() }
                 .onSignal { _, signal ->
                     when (signal) {
                         is Signal.ChildFailed -> {
@@ -356,8 +356,8 @@ class SignalTest {
     // ─── Context-Aware Behavior (receive DSL) ────────────────────
 
     sealed class ContextMsg {
-        data class WhoAmI(val replyTo: ActorRef<String>) : ContextMsg(), Request<String>
-        data class SpawnAndReply(val replyTo: ActorRef<String>) : ContextMsg(), Request<String>
+        data class WhoAmI(override val replyTo: ActorRef<String>) : ContextMsg(), Request<String>
+        data class SpawnAndReply(override val replyTo: ActorRef<String>) : ContextMsg(), Request<String>
     }
 
     @Test

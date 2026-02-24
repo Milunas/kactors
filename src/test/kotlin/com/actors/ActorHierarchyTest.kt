@@ -42,7 +42,7 @@ class ActorHierarchyTest {
 
     sealed class ParentMsg {
         data class SpawnChild(val name: String) : ParentMsg()
-        data class GetChildren(val replyTo: ActorRef<Set<String>>) : ParentMsg(), Request<Set<String>>
+        data class GetChildren(override val replyTo: ActorRef<Set<String>>) : ParentMsg(), Request<Set<String>>
         data class TellChild(val name: String, val msg: String) : ParentMsg()
         data object StopSelf : ParentMsg()
     }
@@ -194,7 +194,7 @@ class ActorHierarchyTest {
     sealed class StopChildMsg {
         data class SpawnChild(val name: String) : StopChildMsg()
         data class StopChild(val name: String) : StopChildMsg()
-        data class GetChildren(val replyTo: ActorRef<Int>) : StopChildMsg(), Request<Int>
+        data class GetChildren(override val replyTo: ActorRef<Int>) : StopChildMsg(), Request<Int>
     }
 
     @Test

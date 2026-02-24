@@ -104,8 +104,8 @@ inline fun <M : Any> statelessBehavior(crossinline handler: suspend (M) -> Unit)
  * ```
  */
 inline fun <M : Any> lifecycleBehavior(
-    crossinline onStart: suspend () -> Unit = {},
-    crossinline onStop: suspend () -> Unit = {},
+    noinline onStart: suspend () -> Unit = {},
+    noinline onStop: suspend () -> Unit = {},
     crossinline handler: suspend (M) -> Behavior<M>
 ): Behavior<M> {
     return behavior<M> { msg -> handler(msg) }

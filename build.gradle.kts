@@ -50,12 +50,23 @@ tasks.test {
 
 kotlin {
     jvmToolchain(21)
+    // Only compile hand-written tests. Generated tla2lincheck tests are
+    // excluded because the generator (v0.1.0-SNAPSHOT) currently produces
+    // code with known issues (untranslated TLA+ syntax, wrong types).
+    // Generated files remain in src/test/tla2lincheck/ for reference.
+    // Re-include once the generator is fixed.
+    sourceSets.test {
+        kotlin.setSrcDirs(listOf("src/test/kotlin"))
+    }
 }
 
 // ─── tla2lincheck: Generate Lincheck tests from TLA+ specs ──────
 // Parses .tla files in src/main/tla/ and generates Kotlin Lincheck
 // test classes with embedded TLA+ invariants.
 // Run: ./gradlew generateLincheckTests
+// Note: generated files are NOT compiled automatically (see above).
+// Once the generator produces valid Kotlin, add "src/test/tla2lincheck"
+// back to sourceSets.test.kotlin.srcDirs.
 tla2lincheck {
     tlaSourceDir.set(file("src/main/tla"))
     outputDir.set(file("src/test/tla2lincheck"))
